@@ -25,7 +25,8 @@ vyges formal report manifest.toml --out formal-out       # re-render after editi
 
 `vyges physical formal …` is the same command. A campaign also needs
 [Yosys](https://github.com/YosysHQ/yosys) and [Verilator](https://github.com/verilator/verilator) on
-`PATH`, and a Liberty for the proof model (`--liberty FILE`, or `[synth] liberty` in the manifest).
+`PATH` ([sv2v](https://github.com/zachjs/sv2v) too, for SystemVerilog read with `frontend = "sv2v"`),
+and a Liberty for the proof model (`--liberty FILE`, or `[synth] liberty` in the manifest).
 
 Exit status: **0** every result as expected · **2** something unexpected (a claim or a mutant) ·
 **1** a tool error. `--json` prints a summary (`report_path`, `unexpected`) when the run ends.
