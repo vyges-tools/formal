@@ -64,7 +64,7 @@ params = { DEPTH = 16 }           # chparam on the top
 # defines = ["SYNTHESIS"]
 # extract_top = true              # keep only the top's module closure (for a file holding more)
 # frontend = "sv2v"               # SystemVerilog packages/imports/interfaces: convert with sv2v
-# include_dirs = ["rtl"]          # `include search path (sv2v), relative to repo
+# include_dirs = ["rtl"]          # `include search path (both frontends), relative to repo
 
 [synth]
 liberty = "${PDK_ROOT}/sky130A/libs.ref/sky130_fd_sc_hd/lib/sky130_fd_sc_hd__tt_025C_1v80.lib"

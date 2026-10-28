@@ -267,10 +267,14 @@ pub fn bind_monitors(m: &Manifest, text: &str) -> Result<(String, HashMap<String
 // synthesize
 // ---------------------------------------------------------------------------------------------
 
+/// The yosys script's front: read the bound RTL, set the parameters, elaborate the top. The RTL was
+/// joined into one file in the run directory, so an `` `include `` in it is found only through the
+/// manifest's include dirs, given here as absolute paths.
 fn yosys_front(m: &Manifest) -> Vec<String> {
     let top = m.top();
-    let defs: Vec<String> = m.defines().iter().map(|d| format!("-D{d}")).collect();
-    let mut c = vec![format!("read_verilog -sv {} rtl.bound.v", defs.join(" "))];
+    let mut flags: Vec<String> = m.defines().iter().map(|d| format!("-D{d}")).collect();
+    flags.extend(m.include_dirs().iter().map(|d| format!("-I{}", m.rtl_path(d).display())));
+    let mut c = vec![format!("read_verilog -sv {} rtl.bound.v", flags.join(" "))];
     for (k, v) in m.params() {
         c.push(format!("chparam -set {k} {v} {top}"));
     }
@@ -930,6 +934,25 @@ mod tests {
         assert_eq!(mods, ["a", "b", "c"]);
         assert!(!body.contains("unused"));
         assert!(extract_closure(text, "nope").is_err());
+    }
+
+    /// The yosys frontend reads the RTL joined into the run directory, so its `` `include ``s
+    /// resolve only through the manifest's include dirs, passed to `read_verilog` as absolute paths.
+    #[test]
+    fn the_yosys_front_passes_include_dirs() {
+        let dir = std::env::temp_dir().join(format!("vf-inc-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("ip/rtl")).unwrap();
+        std::fs::write(
+            dir.join("m.toml"),
+            "[ip]\nname = \"t\"\n[rtl]\nrepo = \"ip\"\nfiles = [\"rtl/t.v\"]\ninclude_dirs = [\"rtl\"]\ndefines = [\"X\"]\ntop = \"t\"\nclock = \"clk\"\n",
+        )
+        .unwrap();
+        let m = Manifest::load(&dir.join("m.toml")).unwrap();
+        let front = yosys_front(&m);
+        let inc = format!("-I{}", m.rtl_path("rtl").display());
+        assert!(front[0].starts_with("read_verilog -sv -DX "), "{}", front[0]);
+        assert!(front[0].contains(&inc) && front[0].ends_with(" rtl.bound.v"), "{}", front[0]);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
