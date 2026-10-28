@@ -28,10 +28,9 @@ pub struct Tools {
     pub sv2v: Option<String>,
 }
 
-/// Cells the proof model must not use: power-gating/isolation and probe cells, and enable flops — the
-/// prover cannot yet read a `next_state` that refers to the flop's own state, so yosys builds an
-/// enable as a mux in front of a plain flop instead.
-pub const DEFAULT_DONT_USE: [&str; 4] = ["*lpflow*", "*probe*", "*edfxtp*", "*edfxbp*"];
+/// Cells the proof model must not use: power-gating/isolation and probe cells. (Enable flops are
+/// fine: the prover reads a `next_state` that refers to the flop's own state.)
+pub const DEFAULT_DONT_USE: [&str; 2] = ["*lpflow*", "*probe*"];
 
 fn module_re() -> Regex {
     Regex::new(r"(?sm)^module\s+(\w+)\b.*?^endmodule\b").unwrap()

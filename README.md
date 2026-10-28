@@ -70,7 +70,7 @@ params = { DEPTH = 16 }           # chparam on the top
 liberty = "${PDK_ROOT}/sky130A/libs.ref/sky130_fd_sc_hd/lib/sky130_fd_sc_hd__tt_025C_1v80.lib"
 # buffer = "sky130_fd_sc_hd__buf_1 A X"        # insbuf cell (defaults shown: sky130 hd)
 # tie = "sky130_fd_sc_hd__conb_1 HI LO"        # constant cell
-# dont_use = ["*lpflow*", "*probe*", "*edfxtp*", "*edfxbp*"]
+# dont_use = ["*lpflow*", "*probe*"]
 
 [defaults]
 timeout_s = 900                   # per proof; a timeout is undecided, never a pass
