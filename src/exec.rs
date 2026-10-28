@@ -72,11 +72,13 @@ pub fn run(cmd: &[String], timeout: Option<Duration>, cwd: Option<&Path>) -> std
     })
 }
 
+// `--` before the negative pid: procps `kill` otherwise reads `-<pgid>` as an option and kills
+// nothing, so the solver runs to its end past the timeout.
 fn kill_group(pid: u32) {
     #[cfg(unix)]
     {
         let _ = Command::new("kill")
-            .args(["-KILL", &format!("-{pid}")])
+            .args(["-KILL", "--", &format!("-{pid}")])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
