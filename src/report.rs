@@ -459,21 +459,92 @@ pub fn report(
     l.extend(trailer(m, &out_name));
     let md = out.join("report.md");
     std::fs::write(&md, l.join("\n")).map_err(|e| format!("{}: {e}", md.display()))?;
-    let j = json!({
+    let mut j = json!({
         "provenance": prov,
         "lint": lintr,
         "results": base,
         "mutants": muts,
         "unexpected": unexpected,
     });
+    let subs = path_subs(m, out, st(&j["provenance"], "liberty"));
+    portable_paths(&mut j, &subs);
     let jp = out.join("report.json");
     std::fs::write(&jp, serde_json::to_string_pretty(&j).unwrap() + "\n").map_err(|e| format!("{}: {e}", jp.display()))?;
     Ok(unexpected)
 }
 
+/// The machine-specific prefixes `report.json` drops, longest first: the run directory (its paths
+/// become relative to it, where `report.json` lives), the RTL repository (written as the manifest
+/// spells `[rtl] repo`), the manifest's directory, and the Liberty (its file name; the sha256 next
+/// to it says which file it was).
+fn path_subs(m: &Manifest, out: &Path, liberty: &str) -> Vec<(String, String)> {
+    let mut subs: Vec<(String, String)> = Vec::new();
+    let mut dir = |from: &Path, to: &str| {
+        let from = from.to_string_lossy().trim_end_matches('/').to_string();
+        if !from.is_empty() && from != "/" {
+            subs.push((format!("{from}/"), if to.is_empty() { String::new() } else { format!("{to}/") }));
+            subs.push((from, if to.is_empty() { ".".into() } else { to.to_string() }));
+        }
+    };
+    dir(out, "");
+    if let (Some(repo), Some(written)) = (m.repo(), m.rtl.get("repo").and_then(|r| r.as_str())) {
+        dir(&repo, written.trim_end_matches('/'));
+    }
+    dir(&m.dir, "");
+    if let Some(name) = Path::new(liberty).file_name().map(|f| f.to_string_lossy().into_owned()) {
+        if Path::new(liberty).is_absolute() {
+            subs.insert(0, (liberty.to_string(), name));
+        }
+    }
+    subs.sort_by_key(|(from, _)| std::cmp::Reverse(from.len()));
+    subs
+}
+
+/// Rewrite every string in `v` with `subs` (applied in order, longest prefix first) and name the
+/// programs it ran by their file names. ⛔ `report.json` is published next to `report.md`; an
+/// absolute path in it names the machine, the user and the directory layout of whoever ran it.
+fn portable_paths(v: &mut Value, subs: &[(String, String)]) {
+    let tool = Regex::new(r#"/[^\s"']*/(vyges-lec|vyges-formal|yosys|yosys-abc|verilator|sv2v)\b"#).unwrap();
+    match v {
+        Value::String(t) => {
+            let mut x = t.clone();
+            for (from, to) in subs {
+                x = x.replace(from.as_str(), to);
+            }
+            *t = tool.replace_all(&x, "$1").into_owned();
+        }
+        Value::Array(a) => a.iter_mut().for_each(|e| portable_paths(e, subs)),
+        Value::Object(o) => o.values_mut().for_each(|e| portable_paths(e, subs)),
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+
+    /// Paths in the run directory become relative to it, the repository reads as the manifest
+    /// writes it, the Liberty and the programs by their names; nothing absolute is left.
+    #[test]
+    fn report_json_paths_are_portable() {
+        let subs = vec![
+            ("/l/sky.lib".to_string(), "sky.lib".to_string()),
+            ("/w/out/".to_string(), String::new()),
+            ("/w/out".to_string(), ".".to_string()),
+            ("/w/ip/".to_string(), "../ip/".to_string()),
+        ];
+        let mut v = json!({
+            "cmd": "/opt/t/vyges-lec prove /w/out/base.nl.v --lib /l/sky.lib -o /w/out/proofs/base/p.json",
+            "rtl_repo": "/w/ip",
+            "log": "/w/out/sim/p.log",
+            "n": [1, "/usr/local/bin/yosys -V"],
+        });
+        super::portable_paths(&mut v, &subs);
+        assert_eq!(v["cmd"], "vyges-lec prove base.nl.v --lib sky.lib -o proofs/base/p.json");
+        assert_eq!(v["log"], "sim/p.log");
+        assert_eq!(v["n"][1], "yosys -V");
+        assert_eq!(v["rtl_repo"], "/w/ip", "an exact match is the prefix without its slash");
+    }
 
     #[test]
     fn excerpt_groups_buses_and_shows_changes_only() {
