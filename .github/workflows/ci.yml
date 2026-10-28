@@ -1,0 +1,27 @@
+# Build, lint and test on every push to main and on pull requests (plus manual dispatch).
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    name: build, clippy, test
+    runs-on: ubuntu-${{ vars.VYGES_UBUNTU_VERSION || '24.04' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --locked
+      - name: Test (suite entry)
+        run: cargo test --locked --features suite

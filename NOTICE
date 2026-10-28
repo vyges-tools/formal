@@ -1,0 +1,12 @@
+Vyges Formal Campaign Engine (vyges-formal)
+Copyright 2026 Vyges. All Rights Reserved.
+
+This product is authored by Vyges (https://vyges.com) and licensed under the
+Apache License, Version 2.0 (the "License"). You may obtain a copy of the
+License in the accompanying LICENSE file or at:
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+vyges-formal runs formal property campaigns on RTL. It drives Yosys (ISC licence)
+and Verilator (LGPL-3.0 or Artistic-2.0) as separate programs found on PATH; it
+does not link or redistribute them.

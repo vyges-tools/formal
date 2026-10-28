@@ -1,0 +1,34 @@
+[package]
+name = "vyges-formal"
+version = "0.1.47"
+edition = "2021"
+description = "Formal property campaigns on RTL: monitors bound into the design, every property proved or refuted, counterexamples replayed in simulation, mutants to measure the property set, one report."
+license = "Apache-2.0"
+authors = ["Vyges <https://vyges.com/contact>"]
+homepage = "https://vyges.com"
+repository = "https://github.com/vyges-tools/formal"
+
+# The campaign drives three programs and reads what they write: yosys (elaborate, bind, synthesize),
+# vyges-lec (prove each property), Verilator (replay each counterexample). The manifest is TOML; lec,
+# yosys and the report speak JSON.
+[dependencies]
+serde_json = { version = "1", features = ["preserve_order"] }
+toml = { version = "0.8", features = ["preserve_order"] }
+regex = "1"
+sha2 = "0.10"
+# Structured events (vyges-events/1.0) for the MCP causal trail. Core-only.
+vyges-events = { git = "https://github.com/vyges-tools/events", branch = "main", default-features = false }
+
+[features]
+# The command-line entry built into the library too (`cli_main`), for the suite binaries
+# that link every engine and run the one they are invoked as.
+suite = []
+default = []
+
+[[bin]]
+name = "vyges-formal"
+path = "src/main.rs"
+
+[lib]
+name = "vyges_formal"
+path = "src/lib.rs"
