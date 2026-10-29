@@ -296,9 +296,9 @@ pub fn report(
     let lib_name = Path::new(st(&p, "liberty")).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
     l.extend([
         format!("| liberty | `{lib_name}` sha256 `{}…` |", short(&p["liberty_sha256"])),
-        format!("| yosys | {} |", st(&p, "yosys")),
-        format!("| prover | {} |", st(&p, "lec")),
-        format!("| campaign | {} |", st(&p, "formal")),
+    ]);
+    l.extend(tool_rows(&p));
+    l.extend([
         String::new(),
         "## Limits of these results".into(),
         String::new(),
@@ -519,9 +519,40 @@ fn portable_paths(v: &mut Value, subs: &[(String, String)]) {
     }
 }
 
+/// The Scope rows naming every program a result depends on. A report written before the
+/// simulator was recorded has no `verilator` key, and gets no row rather than an empty one.
+fn tool_rows(p: &Value) -> Vec<String> {
+    let mut l = vec![format!("| yosys | {} |", st(p, "yosys"))];
+    if let Some(s) = p.get("sv2v").and_then(Value::as_str) {
+        l.push(format!("| sv2v | {s} |"));
+    }
+    if let Some(v) = p.get("verilator").and_then(Value::as_str) {
+        l.push(format!("| simulator | {v} |"));
+    }
+    l.push(format!("| prover | {} |", st(p, "lec")));
+    l.push(format!("| campaign | {} |", st(p, "formal")));
+    l
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+
+    /// A counterexample is confirmed by replay, so the simulator's version is part of the result.
+    #[test]
+    fn scope_names_the_simulator_and_sv2v_when_used() {
+        let p = json!({"yosys": "Yosys 0.65", "verilator": "Verilator 5.040 2025-08-30 rev v5.040",
+                       "sv2v": "v0.0.13", "lec": "vyges-lec 0.1.49", "formal": "vyges-formal 0.1.49"});
+        assert_eq!(super::tool_rows(&p), [
+            "| yosys | Yosys 0.65 |",
+            "| sv2v | v0.0.13 |",
+            "| simulator | Verilator 5.040 2025-08-30 rev v5.040 |",
+            "| prover | vyges-lec 0.1.49 |",
+            "| campaign | vyges-formal 0.1.49 |",
+        ]);
+        let old = json!({"yosys": "Yosys 0.65", "lec": "vyges-lec 0.1.48", "formal": "vyges-formal 0.1.48"});
+        assert_eq!(super::tool_rows(&old).len(), 3, "an older report.json renders without new rows");
+    }
 
     /// Paths in the run directory become relative to it, the repository reads as the manifest
     /// writes it, the Liberty and the programs by their names; nothing absolute is left.

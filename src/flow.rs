@@ -118,6 +118,17 @@ pub fn provenance(m: &Manifest, tools: &Tools) -> Result<Obj, String> {
     p.insert("yosys".into(), json!(ver(&[tools.yosys.clone(), "-V".into()])));
     p.insert("lec".into(), json!(ver(&[tools.lec.clone(), "--version".into()])));
     p.insert("formal".into(), json!(format!("vyges-formal {}", crate::VERSION)));
+    // The replay simulator and, when it is the frontend, sv2v shape the results as much as yosys.
+    let verilator = match &tools.verilator {
+        Some(v) => ver(&[v.clone(), "--version".into()]),
+        None => "not found — counterexamples are reported unreplayed".into(),
+    };
+    p.insert("verilator".into(), json!(verilator));
+    if m.frontend() == "sv2v" {
+        if let Some(s) = &tools.sv2v {
+            p.insert("sv2v".into(), json!(ver(&[s.clone(), "--version".into()])));
+        }
+    }
     let mut mon = Obj::new();
     for b in &m.binds {
         mon.insert(b.file.clone(), json!(sha256(&m.p(&b.file)).map_err(|e| format!("{}: {e}", b.file))?));
