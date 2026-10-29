@@ -1,6 +1,6 @@
 [package]
 name = "vyges-formal"
-version = "0.1.48"
+version = "0.1.49"
 edition = "2021"
 description = "Formal property campaigns on RTL: monitors bound into the design, every property proved or refuted, counterexamples replayed in simulation, mutants to measure the property set, one report."
 license = "Apache-2.0"
