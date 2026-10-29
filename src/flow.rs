@@ -917,7 +917,7 @@ pub fn resolve_tools(
     if !liberty.is_file() {
         return Err(format!("Liberty not found: {}", liberty.display()));
     }
-    let lec = if lec.contains('/') { m.p(&lec).to_string_lossy().into_owned() } else { lec };
+    let lec = if lec.contains('/') { m.tool_path(&lec).to_string_lossy().into_owned() } else { lec };
     Ok(Tools { lec, yosys, liberty, verilator, sv2v })
 }
 

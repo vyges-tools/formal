@@ -250,6 +250,14 @@ impl Manifest {
         std::fs::canonicalize(&q).unwrap_or_else(|_| normalize(&q))
     }
 
+    /// A tool path: like [`Manifest::p`], but a symlink is kept, never resolved. A suite install
+    /// links `vyges-lec` to one multi-call binary that dispatches on the name it was run as;
+    /// resolving the link runs that binary under its own name, and every proof fails.
+    pub fn tool_path(&self, rel: &str) -> PathBuf {
+        let q = PathBuf::from(expand_user(&expand_vars(rel)));
+        normalize(&if q.is_absolute() { q } else { self.dir.join(q) })
+    }
+
     pub fn rtl_path(&self, f: &str) -> PathBuf {
         match self.repo() {
             Some(r) => r.join(f),
@@ -288,4 +296,28 @@ fn normalize(p: &Path) -> PathBuf {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A suite install links `vyges-lec -> vyges-physical`, which dispatches on its run name: the
+    /// tool path must keep the link name, where a manifest path resolves it.
+    #[cfg(unix)]
+    #[test]
+    fn a_tool_path_keeps_the_symlink_a_suite_install_dispatches_on() {
+        let d = std::env::temp_dir().join(format!("vyges-formal-toolpath-{}", std::process::id()));
+        std::fs::create_dir_all(d.join("bin")).unwrap();
+        std::fs::write(d.join("bin/vyges-physical"), "").unwrap();
+        let _ = std::fs::remove_file(d.join("bin/vyges-lec"));
+        std::os::unix::fs::symlink("vyges-physical", d.join("bin/vyges-lec")).unwrap();
+        std::fs::write(d.join("manifest.toml"), "[ip]\nname = \"t\"\n[rtl]\ntop = \"t\"\nfiles = [\"t.v\"]\n").unwrap();
+        let m = Manifest::load(&d.join("manifest.toml")).unwrap();
+        let lec = d.join("bin/vyges-lec").to_string_lossy().into_owned();
+        assert!(m.tool_path(&lec).ends_with("bin/vyges-lec"));
+        assert!(m.tool_path("bin/vyges-lec").ends_with("bin/vyges-lec"));
+        assert!(m.p(&lec).ends_with("bin/vyges-physical"), "the case the tool path exists for");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
 }
