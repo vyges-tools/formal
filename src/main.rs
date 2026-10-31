@@ -95,44 +95,51 @@ const DESCRIBE: &str = r#"{
     "optional": [ { "arg": "out", "flag": "--out" }, { "arg": "jobs", "flag": "--jobs" }, { "arg": "only", "flag": "--only" }, { "arg": "liberty", "flag": "--liberty" } ],
     "emits_json": true
   },
-  "commands": [
-    {
-      "name": "run",
-      "summary": "run the campaign the manifest describes and write report.md and report.json",
-      "args_template": ["run", "{manifest}", "--json"],
-      "optional": [ { "arg": "out", "flag": "--out" }, { "arg": "jobs", "flag": "--jobs" }, { "arg": "only", "flag": "--only" }, { "arg": "liberty", "flag": "--liberty" } ],
-      "assertion": { "id": "all-as-expected", "field": "all_as_expected", "pass_when": { "is_true": true } }
-    },
-    {
-      "name": "replay",
-      "summary": "replay one counterexample of a finished run in simulation, cycle by cycle",
-      "args_template": ["replay", "{manifest}", "{id}", "--out", "{out}"],
-      "optional": [ { "arg": "show", "flag": "--show" } ]
-    },
-    {
-      "name": "report",
-      "summary": "re-render a finished run's report from its report.json (no proof re-run)",
-      "args_template": ["report", "{manifest}", "--out", "{out}"],
-      "optional": []
-    }
-  ],
   "inputs": {
     "type": "object",
     "required": ["manifest"],
     "properties": {
       "manifest": { "type": "string", "description": "path to the campaign manifest (TOML)" },
       "out": { "type": "string", "description": "the run's output directory" },
-      "id": { "type": "string", "description": "replay: the property or cover whose counterexample to replay" },
-      "show": { "type": "string", "description": "replay: comma-separated flattened signal names to print per cycle" },
-      "jobs": { "type": "integer", "description": "run: proofs in parallel" },
-      "only": { "type": "string", "description": "run: comma-separated property/cover ids to run" },
+      "jobs": { "type": "integer", "description": "proofs in parallel" },
+      "only": { "type": "string", "description": "comma-separated property/cover ids to run" },
       "liberty": { "type": "string", "description": "the Liberty the proof model is mapped to (overrides the manifest)" }
     }
   },
   "consumes": ["rtl", "liberty"],
   "artifacts": [ { "role": "formal_report", "field": "report_path" } ],
-  "threads": { "model": "processes", "flag": "--jobs", "default": "half the cores" },
-  "assertion": { "id": "all-as-expected", "field": "all_as_expected", "pass_when": { "is_true": true } }
+  "threads": { "parallel": true, "model": "processes", "flag": "--jobs", "default": "half the cores", "guidance": "Proofs run as child processes, --jobs at a time (default half the cores); lower it to share the machine with other runs." },
+  "assertion": { "id": "all-as-expected", "field": "all_as_expected", "pass_when": { "is_true": true } },
+  "tools": [
+    {
+      "name": "formal.replay",
+      "summary": "replay one counterexample of a finished run in simulation, cycle by cycle",
+      "invocation": { "args_template": ["replay", "{manifest}", "{id}", "--out", "{out}"], "optional": [{ "arg": "show", "flag": "--show" }], "emits_json": false },
+      "inputs": {
+        "type": "object",
+        "required": ["manifest", "id", "out"],
+        "properties": {
+          "manifest": { "type": "string", "description": "path to the campaign manifest (TOML)" },
+          "id": { "type": "string", "description": "the property or cover whose counterexample to replay" },
+          "out": { "type": "string", "description": "the run's output directory" },
+          "show": { "type": "string", "description": "comma-separated flattened signal names to print per cycle" }
+        }
+      }
+    },
+    {
+      "name": "formal.report",
+      "summary": "re-render a finished run's report from its report.json (no proof re-run)",
+      "invocation": { "args_template": ["report", "{manifest}", "--out", "{out}"], "emits_json": false },
+      "inputs": {
+        "type": "object",
+        "required": ["manifest", "out"],
+        "properties": {
+          "manifest": { "type": "string", "description": "path to the campaign manifest (TOML)" },
+          "out": { "type": "string", "description": "the run's output directory" }
+        }
+      }
+    }
+  ]
 }
 "#;
 
@@ -374,8 +381,48 @@ mod tests {
     #[test]
     fn descriptor_is_json_and_describes_every_command() {
         let d: serde_json::Value = serde_json::from_str(super::DESCRIBE).unwrap();
-        let named: Vec<&str> = d["commands"].as_array().unwrap().iter().map(|c| c["name"].as_str().unwrap()).collect();
+        // The main invocation is `run`; every other command is a `tools[]` entry, formal.<command>.
+        let mut named: Vec<String> = vec![d["invocation"]["args_template"][0].as_str().unwrap().to_string()];
+        named.extend(d["tools"].as_array().unwrap().iter().map(|c| c["name"].as_str().unwrap().trim_start_matches("formal.").to_string()));
         assert_eq!(named, super::COMMANDS);
         assert!(["discovered", "structured", "workflow-validated"].contains(&d["maturity"].as_str().unwrap()));
+    }
+}
+
+#[cfg(test)]
+mod descriptor_args_tests {
+    use super::DESCRIBE;
+    /// Every advertised input reaches the command line, and every command-line token is
+    /// advertised -- for the main operation and each `tools[]` entry. `vyges mcp` builds the
+    /// argv from these and refuses an argument the template would drop; 0.1.51 shipped inputs
+    /// that never arrived (ifp's die area, ppl's layers, fin's rules).
+    #[test]
+    fn every_advertised_input_reaches_the_command_line() {
+        use std::collections::BTreeSet;
+        let d: serde_json::Value = serde_json::from_str(DESCRIBE).expect("descriptor is valid JSON");
+        let mut ops = vec![d.clone()];
+        ops.extend(d["tools"].as_array().cloned().unwrap_or_default());
+        for op in &ops {
+            let inv = &op["invocation"];
+            let mut used: BTreeSet<String> = inv["args_template"]
+                .as_array()
+                .expect("an args_template")
+                .iter()
+                .filter_map(|t| t.as_str())
+                .filter(|t| t.starts_with('{') && t.ends_with('}'))
+                .map(|t| t[1..t.len() - 1].to_string())
+                .collect();
+            if let Some(o) = inv.get("optional") {
+                let o = o.as_array().expect("invocation.optional is an array of {arg, flag}");
+                used.extend(o.iter().map(|x| x["arg"].as_str().expect("an arg").to_string()));
+            }
+            let props: BTreeSet<String> = op["inputs"]["properties"]
+                .as_object()
+                .expect("inputs.properties")
+                .keys()
+                .cloned()
+                .collect();
+            assert_eq!(used, props, "{}: command line vs advertised inputs", op["name"]);
+        }
     }
 }
