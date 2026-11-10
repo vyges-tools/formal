@@ -296,8 +296,8 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vyges-events"
-version = "0.1.54"
-source = "git+https://github.com/vyges-tools/events?branch=main#a1cf6c92afceb947965bdf1144104049bc14aaa9"
+version = "0.1.55"
+source = "git+https://github.com/vyges-tools/events?branch=main#87cca49dfd0e7030b890a084472a00930bcfb45e"
 dependencies = [
  "serde",
  "serde_json",
@@ -305,7 +305,7 @@ dependencies = [
 
 [[package]]
 name = "vyges-formal"
-version = "0.1.54"
+version = "0.1.55"
 dependencies = [
  "regex",
  "serde_json",
