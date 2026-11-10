@@ -1,7 +1,5 @@
 # vyges-formal
 
-**[Download Loom](https://vyges.com/products/vyges-cli/#install)** · install the free [Vyges CLI](https://vyges.com/products/vyges-cli/), then `vyges install loom`
-
 A **formal property campaign** on an IP's RTL, from a manifest to one report: monitors bound into
 the design, every property and cover proved or refuted, every counterexample replayed in
 simulation, mutants to measure the property set — and every result tied to the git commit of the
