@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "vyges-formal-report/1.0",
+  "title": "vyges formal verification record",
+  "type": "object",
+  "required": ["schema_version", "provenance", "verdict", "counts", "requirements", "requirements_without_property",
+    "properties_without_requirement", "environment", "lint", "findings", "results", "mutants", "mutation",
+    "limitations", "unexpected"],
+  "properties": {
+    "schema_version": { "const": "vyges-formal-report/1.0" },
+    "verdict": { "enum": ["CLEAN", "FINDINGS", "INCOMPLETE"] },
+    "counts": {
+      "type": "object",
+      "required": ["properties", "covers", "counterexamples", "mutants"]
+    },
+    "results": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["result", "engine", "requirements", "assumptions", "activation", "evidence", "status", "verdict"],
+        "properties": {
+          "result": { "enum": ["PROVEN", "BOUNDED", "FAILED", "REACHED", "UNREACHABLE", "UNDECIDED", "VACUOUS", "WAIVED"] },
+          "status": { "enum": ["as-expected", "FINDING", "UNEXPECTED"] }
+        }
+      }
+    },
+    "findings": { "type": "array", "items": { "type": "object", "required": ["id", "title", "properties", "disposition", "state"] } },
+    "mutation": { "type": "object", "required": ["survivors", "idle_properties"] },
+    "limitations": { "type": "array", "items": { "type": "string" } }
+  }
+}

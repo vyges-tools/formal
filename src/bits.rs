@@ -22,6 +22,18 @@ impl Bits {
         self.0.first().is_some_and(|w| *w > 1) || self.0.iter().skip(1).any(|w| *w != 0)
     }
 
+    /// Bits `lsb` to `lsb + width - 1`, as a value of their own.
+    pub fn slice(&self, lsb: usize, width: usize) -> Bits {
+        let mut out = Bits::default();
+        for i in 0..width {
+            let at = lsb + i;
+            if self.0.get(at / 64).is_some_and(|w| w >> (at % 64) & 1 == 1) {
+                out.set(i);
+            }
+        }
+        out
+    }
+
     /// Lowercase hex, no leading zeros, `0` for zero.
     pub fn hex(&self) -> String {
         let Some(top) = self.0.iter().rposition(|w| *w != 0) else {
@@ -50,5 +62,14 @@ mod tests {
         b.set(109);
         assert_eq!(b.hex(), "2000000000000000000000000001");
         assert!(b.gt1());
+    }
+
+    #[test]
+    fn slice_reads_a_field_across_a_word_boundary() {
+        let mut b = Bits::default();
+        b.set(62);
+        b.set(64);
+        assert_eq!(b.slice(61, 4).hex(), "a");
+        assert_eq!(b.slice(200, 4).hex(), "0");
     }
 }

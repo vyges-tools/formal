@@ -7,7 +7,8 @@ use serde_json::{json, Map, Value};
 
 use crate::bits::Bits;
 use crate::flow::{truthy, Obj};
-use crate::manifest::Manifest;
+use crate::manifest::{Decode, Manifest};
+use crate::record;
 
 const LIMITS: &str = "\
 - Results hold only for the RTL commit, parameters, defines and monitors listed under *Scope*, as
@@ -34,8 +35,22 @@ fn secs(v: &Value) -> String {
     format!("{:.1}", v.as_f64().unwrap_or(0.0))
 }
 
-/// Per cycle, the bus-grouped inputs that changed since the previous cycle (cycle 0: the non-zero ones).
+/// `name=value`, or the named fields of a packed signal when the manifest describes it.
+fn show_input(name: &str, v: &Bits, decodes: &[Decode]) -> String {
+    let Some(d) = decodes.iter().find(|d| d.signal == name) else {
+        return if v.gt1() { format!("{name}=0x{}", v.hex()) } else { format!("{name}={}", v.hex()) };
+    };
+    let fields: Vec<String> =
+        d.fields.iter().map(|f| format!("{}=0x{}", f.name, v.slice(f.lsb, f.width).hex())).collect();
+    format!("{name}({})", fields.join(" "))
+}
+
 pub fn trace_excerpt(trace: &Value, max_lines: usize) -> Vec<String> {
+    decoded_excerpt(trace, max_lines, &[])
+}
+
+/// Per cycle, the bus-grouped inputs that changed since the previous cycle (cycle 0: the non-zero ones).
+pub fn decoded_excerpt(trace: &Value, max_lines: usize, decodes: &[Decode]) -> Vec<String> {
     let bit = Regex::new(r"^(.*)\[(\d+)\]$").unwrap();
     let mut out = vec![];
     let mut prev: Vec<(String, Bits)> = vec![];
@@ -73,10 +88,7 @@ pub fn trace_excerpt(trace: &Value, max_lines: usize) -> Vec<String> {
         if ch.is_empty() {
             out.push(format!("cycle {cyc}: (no input change)"));
         } else {
-            let parts: Vec<String> = ch
-                .iter()
-                .map(|(k, v)| if v.gt1() { format!("{k}=0x{}", v.hex()) } else { format!("{k}={}", v.hex()) })
-                .collect();
+            let parts: Vec<String> = ch.iter().map(|(k, v)| show_input(k, v, decodes)).collect();
             out.push(format!("cycle {cyc}: {}", parts.join(" ")));
         }
         prev = groups;
@@ -112,43 +124,6 @@ pub fn rtl_line(prov: &Obj) -> String {
         st(&p, "rtl_commit_date"),
         st(&p, "rtl_commit_subject")
     )
-}
-
-fn findings_table(m: &Manifest, base: &Obj, prov: &Obj) -> Vec<String> {
-    let rows: Vec<_> = m
-        .properties
-        .iter()
-        .chain(&m.covers)
-        .filter(|it| base.get(&it.id).is_some_and(|r| st(r, "status") == "FINDING"))
-        .collect();
-    if rows.is_empty() {
-        return vec![];
-    }
-    let short: String = prov.get("rtl_commit").and_then(Value::as_str).unwrap_or("").chars().take(12).collect();
-    let mut l = vec![
-        if short.is_empty() { "## Findings".to_string() } else { format!("## Findings at `{short}`") },
-        String::new(),
-        "Each is a design behaviour the specification forbids, shown for every input sequence (an unreachable \
-         cover) or by a counterexample replayed in simulation. Re-run this campaign on a later commit to \
-         track each one; a fixed finding turns UNEXPECTED until its `expect` is restored to the spec value."
-            .into(),
-        String::new(),
-        "| id | claim | statement | evidence |".into(),
-        "|---|---|---|---|".into(),
-    ];
-    for it in rows {
-        let r = &base[&it.id];
-        let ev = if st(r, "cover") == "unreachable" {
-            "unreachable for every input sequence".to_string()
-        } else {
-            let cyc = r.get("trace").and_then(|t| t.get("cycle")).map(|c| c.to_string()).unwrap_or_else(|| "None".into());
-            let conf = r.get("replay").and_then(|x| x.get("confirmed")).and_then(Value::as_bool).unwrap_or(false);
-            format!("counterexample, cycle {cyc}{}", if conf { ", confirmed in simulation" } else { "" })
-        };
-        l.push(format!("| `{}` | {} | {} | {ev} |", it.id, it.claim, it.text));
-    }
-    l.push(String::new());
-    l
 }
 
 /// The ids that did not come out as expected: claims in the manifest's order, then mutants.
@@ -219,132 +194,246 @@ fn trailer(m: &Manifest, out_name: &str) -> Vec<String> {
     .collect()
 }
 
-pub fn report(
-    m: &Manifest,
-    out: &Path,
-    prov: &Obj,
-    lintr: &Obj,
-    base: &Obj,
-    muts: &[Value],
-    stats_log: &Path,
-) -> Result<Vec<String>, String> {
-    let out_name = out.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_else(|| "out".into());
-    let props: Vec<_> = m.properties.iter().filter_map(|p| base.get(&p.id).map(|r| (p, r))).collect();
-    let covs: Vec<_> = m.covers.iter().filter_map(|c| base.get(&c.id).map(|r| (c, r))).collect();
-    let unexpected = unexpected(m, base, muts);
-    let v = |r: &Value| st(r, "verdict").to_string();
-    let count = |f: &dyn Fn(&Value) -> bool| props.iter().filter(|(_, r)| f(r)).count();
-    let p = Value::Object(prov.clone());
-    let mut l: Vec<String> = vec![format!("# Formal report — {}", m.name()), String::new()];
-    l.extend(header(m, &out_name));
-    l.extend([
+fn strs_of(v: &Value) -> Vec<String> {
+    v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default()
+}
+
+fn code_list(v: &Value) -> String {
+    let a = strs_of(v);
+    if a.is_empty() {
+        "none".into()
+    } else {
+        a.iter().map(|s| format!("`{s}`")).collect::<Vec<_>>().join(", ")
+    }
+}
+
+fn opt<'a>(v: &'a Value, k: &str) -> &'a str {
+    match st(v, k) {
+        "" => "not stated",
+        s => s,
+    }
+}
+
+fn summary(m: &Manifest, prov: &Obj, rec: &Value, unexpected: &[String]) -> Vec<String> {
+    let c = &rec["counts"];
+    let row = |group: &str, keys: &[&str]| -> String {
+        keys.iter().map(|k| format!("{k} {}", c[group][*k])).collect::<Vec<_>>().join(" · ")
+    };
+    let mut l = vec![
+        "## 1. Verification summary".to_string(),
+        String::new(),
         format!("_{}_", m.ip_str("description").unwrap_or_default()),
         String::new(),
         rtl_line(prov),
         String::new(),
-        format!(
-            "Run {} · overall: **{}**",
-            st(&p, "run_utc"),
-            if unexpected.is_empty() { "ALL AS EXPECTED".to_string() } else { format!("UNEXPECTED: {}", unexpected.join(", ")) }
-        ),
+        format!("**Verdict: {}** (run {})", st(rec, "verdict"), st(&rec["provenance"], "run_utc")),
         String::new(),
-        "## Summary".into(),
+        "Every claim below holds only under the assumptions listed for it in section 4.".into(),
         String::new(),
-        "| | count |".into(),
+        "| | |".into(),
         "|---|---|".into(),
-        format!("| properties proved (unbounded) | {} |", count(&|r| v(r) == "holds")),
-        format!("| properties holding within a bound | {} |", count(&|r| v(r) == "holds_within")),
-        format!("| properties failing (counterexample) | {} |", count(&|r| v(r) == "fails")),
-        format!(
-            "| undecided (timeout / error) | {} |",
-            count(&|r| !matches!(v(r).as_str(), "holds" | "holds_within" | "fails"))
-        ),
-        format!("| covers reached | {} / {} |", covs.iter().filter(|(_, r)| st(r, "cover") == "reached").count(), covs.len()),
-        format!("| mutants killed | {} / {} |", muts.iter().filter(|x| st(x, "status") == "killed").count(), muts.len()),
-        format!(
-            "| **design findings (confirmed counterexamples / dead logic)** | {} |",
-            base.values().filter(|r| st(r, "status") == "FINDING").count()
-        ),
-        format!(
-            "| counterexamples confirmed in simulation | {} / {} |",
-            base.values()
-                .filter(|r| r.get("replay").and_then(|x| x.get("confirmed")).and_then(Value::as_bool).unwrap_or(false))
-                .count(),
-            base.values().filter(|r| r.get("trace").is_some()).count()
-        ),
+        format!("| properties | {} |", row("properties", &["PROVEN", "BOUNDED", "FAILED", "UNDECIDED", "VACUOUS", "WAIVED"])),
+        format!("| covers | {} |", row("covers", &["REACHED", "UNREACHABLE", "UNDECIDED", "WAIVED"])),
+        format!("| counterexamples replayed | {} of {} |", c["counterexamples"]["replayed"], c["counterexamples"]["total"]),
+        format!("| mutants detected | {} of {} |", c["mutants"]["detected"], c["mutants"]["total"]),
         String::new(),
-    ]);
-    l.extend(findings_table(m, base, prov));
-    l.extend(["## Scope", "", "| item | value |", "|---|---|"].map(String::from));
-    for k in ["rtl_remote", "rtl_commit", "rtl_commit_date", "rtl_dirty"] {
-        if let Some(x) = prov.get(k) {
-            let s = x.as_str().map(str::to_string).unwrap_or_else(|| x.to_string());
-            l.push(format!("| {k} | `{s}` |"));
-        }
+    ];
+    if !unexpected.is_empty() {
+        l.extend([format!("Not as the campaign expected: {}.", unexpected.join(", ")), String::new()]);
     }
+    l
+}
+
+fn scope(m: &Manifest) -> Vec<String> {
+    let mut l: Vec<String> = ["## 2. Scope", "", "| item | value |", "|---|---|"].map(String::from).to_vec();
     l.push(format!("| top | `{}` |", m.top()));
     for (k, val) in m.params() {
         l.push(format!("| param `{k}` | {val} |"));
     }
-    let short = |h: &Value| h.as_str().unwrap_or("").chars().take(16).collect::<String>();
-    for (f, h) in p["rtl_files"].as_object().into_iter().flatten() {
-        l.push(format!("| rtl `{f}` | sha256 `{}…` |", short(h)));
-    }
-    for (f, h) in p["monitors"].as_object().into_iter().flatten() {
-        l.push(format!("| monitor `{f}` | sha256 `{}…` |", short(h)));
-    }
-    let lib_name = Path::new(st(&p, "liberty")).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
-    l.extend([
-        format!("| liberty | `{lib_name}` sha256 `{}…` |", short(&p["liberty_sha256"])),
-    ]);
-    l.extend(tool_rows(&p));
-    l.extend([
-        String::new(),
-        "## Limits of these results".into(),
-        String::new(),
-        LIMITS.into(),
-    ]);
+    l.push(String::new());
     if let Some(n) = m.ip_str("scope_notes") {
         l.extend([n.trim().to_string(), String::new()]);
     }
-    l.extend(["## Assumptions", "", "| id | assumption |", "|---|---|"].map(String::from));
-    l.extend(m.assumptions.iter().map(|a| format!("| `{}` | {} |", a.id, a.text)));
-    l.extend(
-        [
-            "",
-            "## Properties",
-            "",
-            "| id | claim | statement | mode | result | expected | status | time |",
-            "|---|---|---|---|---|---|---|---|",
-        ]
-        .map(String::from),
-    );
-    for (it, r) in &props {
-        let mode = match r.get("bound").and_then(Value::as_i64) {
-            Some(b) if b != 0 => format!("bounded {b}"),
-            _ => "unbounded".into(),
-        };
+    l
+}
+
+fn plan(m: &Manifest, rec: &Value) -> Vec<String> {
+    let mut l = vec!["## 3. Verification plan".to_string(), String::new()];
+    let reqs = rec["requirements"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+    if reqs.is_empty() {
+        l.extend(["No requirements are declared. Claims are grouped by the manifest's `claim` field.".to_string(), String::new()]);
+        let mut claims: Vec<&str> = m.properties.iter().map(|p| p.claim.as_str()).collect();
+        claims.dedup();
+        l.extend([format!("Claim groups: {}.", claims.join(", ")), String::new()]);
+        return l;
+    }
+    l.extend(["| requirement | statement | source | properties | covers |".to_string(), "|---|---|---|---|---|".into()]);
+    for q in reqs {
         l.push(format!(
-            "| `{}` | {} | {} | {mode} | {} | {} | {} | {}s |",
-            it.id,
-            it.claim,
-            it.text,
-            v(r),
-            it.expect.as_deref().unwrap_or("holds"),
-            st(r, "status"),
-            secs(&r["seconds"])
+            "| `{}` | {} | {} | {} | {} |",
+            st(q, "id"),
+            st(q, "text"),
+            opt(q, "source"),
+            code_list(&q["properties"]),
+            code_list(&q["covers"])
         ));
     }
-    let used: Vec<String> = props
-        .iter()
-        .map(|(it, _)| {
-            let a = if it.assumptions.is_empty() { "none".to_string() } else { it.assumptions.join(", ") };
-            format!("`{}`: {a}", it.id)
-        })
-        .collect();
-    l.extend([String::new(), format!("Assumptions used: {}", used.join("; ")), String::new()]);
-    for (it, r) in &props {
-        if v(r) != "fails" {
+    l.extend([
+        String::new(),
+        format!("Requirements with no property: {}.", code_list(&rec["requirements_without_property"])),
+        String::new(),
+        format!("Properties with no requirement: {}.", code_list(&rec["properties_without_requirement"])),
+        String::new(),
+    ]);
+    l
+}
+
+fn environment(rec: &Value, lintr: &Obj) -> Vec<String> {
+    let e = &rec["environment"];
+    let mut l: Vec<String> = ["## 4. Formal environment", "", "### Clocks and resets", "", "| module | clock | reset |", "|---|---|---|"]
+        .map(String::from)
+        .to_vec();
+    for b in e["clocks"].as_array().into_iter().flatten() {
+        let low = b["reset_active_low"].as_bool().unwrap_or(true);
+        l.push(format!("| `{}` | `{}` | `{}` ({}) |", st(b, "module"), st(b, "clock"), st(b, "reset"), if low { "active low" } else { "active high" }));
+    }
+    l.extend(
+        ["", "### Assumptions", "", "| id | assumption | class | rationale | source |", "|---|---|---|---|---|"].map(String::from),
+    );
+    for a in e["assumptions"].as_array().into_iter().flatten() {
+        l.push(format!("| `{}` | {} | {} | {} | {} |", st(a, "id"), st(a, "text"), opt(a, "class"), opt(a, "rationale"), opt(a, "source")));
+    }
+    l.extend(["", "### Abstractions", "", "| kind | items |", "|---|---|"].map(String::from));
+    for (k, label) in [
+        ("black_boxes", "black boxes"),
+        ("cut_points", "cut points"),
+        ("memory_models", "memory models"),
+        ("reduced_parameters", "reduced parameters"),
+        ("disabled_logic", "disabled logic"),
+        ("registers_without_reset", "registers without reset"),
+    ] {
+        l.push(format!("| {label} | {} |", code_list(&e[k])));
+    }
+    let check = match e["setup"]["yosys_check_problems"].as_u64() {
+        Some(n) => format!("{n} problems"),
+        None => "not run".to_string(),
+    };
+    l.extend([
+        String::new(),
+        "### Setup analysis".into(),
+        String::new(),
+        format!("- Yosys `check` (loops, multiple drivers): {check}"),
+        format!("- Assumption sets with no reached cover: {}", code_list(&e["setup"]["unconfirmed_assumption_sets"])),
+        format!(
+            "- Registers: {} with async reset, {} with sync reset, {} in monitors",
+            lintr.get("async_reset").cloned().unwrap_or(json!(0)),
+            lintr.get("sync_reset").and_then(Value::as_array).map_or(0, Vec::len),
+            lintr.get("monitor").cloned().unwrap_or(json!(0))
+        ),
+        String::new(),
+    ]);
+    l
+}
+
+fn property_table(m: &Manifest, rec: &Value) -> Vec<String> {
+    let mut l: Vec<String> = [
+        "## 5. Property results",
+        "",
+        "| id | requirements | statement | result | depth and engine | assumptions | activation | against expectation | time | evidence |",
+        "|---|---|---|---|---|---|---|---|---|---|",
+    ]
+    .map(String::from)
+    .to_vec();
+    for it in &m.properties {
+        let Some(r) = rec["results"].get(&it.id) else { continue };
+        let depth = match r.get("bound").and_then(Value::as_i64) {
+            Some(b) if b != 0 => format!("to cycle {b}, {}", st(r, "engine")),
+            _ => format!("unbounded, {}", st(r, "engine")),
+        };
+        let result = match r.get("cause").and_then(Value::as_str) {
+            Some(c) => format!("{} ({c})", st(r, "result")),
+            None => st(r, "result").to_string(),
+        };
+        l.push(format!(
+            "| `{}` | {} | {} | {result} | {depth} | {} | {} | {} | {}s | `{}` |",
+            it.id,
+            code_list(&r["requirements"]),
+            it.text,
+            code_list(&r["assumptions"]),
+            st(r, "activation"),
+            st(r, "status"),
+            secs(&r["seconds"]),
+            st(r, "evidence")
+        ));
+    }
+    l.push(String::new());
+    l
+}
+
+fn cover_table(m: &Manifest, rec: &Value) -> Vec<String> {
+    let mut l: Vec<String> = [
+        "## 6. Coverage and reachability",
+        "",
+        "A reached cover shows the assumptions still allow that behaviour. An unreachable cover means either the \
+         assumptions are too strong or the logic is dead.",
+        "",
+    ]
+    .map(String::from)
+    .to_vec();
+    let groups: [(&str, fn(&&crate::manifest::Item) -> bool); 2] =
+        [("Claimed covers", |c| !c.id.starts_with("gen_")), ("Generated state covers", |c| c.id.starts_with("gen_"))];
+    for (title, keep) in groups {
+        let chosen: Vec<_> = m.covers.iter().filter(keep).collect();
+        if chosen.is_empty() {
+            continue;
+        }
+        l.extend([format!("### {title}"), String::new(), "| id | statement | result | against expectation | at cycle |".into(), "|---|---|---|---|---|".into()]);
+        for it in chosen {
+            let Some(r) = rec["results"].get(&it.id) else { continue };
+            let cyc = r.get("trace").and_then(|t| t.get("cycle")).map(|c| c.to_string()).unwrap_or_default();
+            let result = match r.get("cause").and_then(Value::as_str) {
+                Some(c) => format!("{} ({c})", st(r, "result")),
+                None => st(r, "result").to_string(),
+            };
+            l.push(format!("| `{}` | {} | {result} | {} | {cyc} |", it.id, it.text, st(r, "status")));
+            if title.starts_with("Generated") && st(r, "result") == "UNREACHABLE" {
+                l.push(format!("| | possible dead logic: `{}` | | | |", it.id));
+            }
+        }
+        l.push(String::new());
+    }
+    l
+}
+
+fn finding_blocks(m: &Manifest, base: &Obj, rec: &Value) -> Vec<String> {
+    let mut l = vec!["## 7. Findings".to_string(), String::new()];
+    let all = rec["findings"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+    if all.is_empty() {
+        l.extend(["No findings are recorded for this campaign.".to_string(), String::new()]);
+    }
+    for f in all {
+        l.extend([format!("### {} — {}", st(f, "id"), st(f, "title")), String::new(), "| | |".into(), "|---|---|".into()]);
+        l.push(format!("| properties | {} |", code_list(&f["properties"])));
+        l.push(format!("| state at this commit | {} |", st(f, "state")));
+        for (k, label) in [
+            ("severity", "severity"),
+            ("found_at", "found at"),
+            ("expected", "expected"),
+            ("root_cause", "root cause"),
+            ("disposition", "disposition"),
+            ("fix", "fix"),
+            ("regression", "regression"),
+            ("tracker", "tracker"),
+        ] {
+            if !st(f, k).is_empty() {
+                l.push(format!("| {label} | {} |", st(f, k)));
+            }
+        }
+        l.push(String::new());
+    }
+    for it in &m.properties {
+        let Some(r) = base.get(&it.id) else { continue };
+        if st(r, "verdict") != "fails" {
             continue;
         }
         l.extend([format!("### Counterexample — `{}`", it.id), String::new()]);
@@ -365,89 +454,94 @@ pub fn report(
         }
         let cyc = r["trace"].get("cycle").map(|c| c.to_string()).unwrap_or_else(|| "None".into());
         l.extend([
-            format!(
-                "`{}` is 1 in cycle {cyc}. Inputs (changes only; full trace in `proofs/base/{}.json`):",
-                st(r, "net"),
-                it.id
-            ),
+            format!("`{}` is 1 in cycle {cyc}. Inputs (changes only; full trace in `proofs/base/{}.json`):", st(r, "net"), it.id),
             String::new(),
             "```".into(),
         ]);
-        l.extend(trace_excerpt(&r["trace"], 40));
+        l.extend(decoded_excerpt(&r["trace"], 40, &m.decodes));
         l.extend(["```".to_string(), String::new()]);
     }
-    l.extend(
-        [
-            "## Covers (non-vacuity)",
-            "",
-            "A cover that is reached shows the assumptions still allow that behaviour; an unreachable cover means \
-             either the assumptions are too strong or the logic is dead.",
-            "",
-            "| id | statement | result | expected | status | at cycle |",
-            "|---|---|---|---|---|---|",
-        ]
-        .map(String::from),
-    );
-    for (it, r) in &covs {
-        let cyc = r.get("trace").and_then(|t| t.get("cycle")).map(|c| c.to_string()).unwrap_or_default();
-        let res = r.get("cover").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| v(r));
-        l.push(format!(
-            "| `{}` | {} | {res} | {} | {} | {cyc} |",
-            it.id,
-            it.text,
-            it.expect.as_deref().unwrap_or("reached"),
-            st(r, "status")
-        ));
-    }
-    for (it, r) in &covs {
-        if let Some(f) = &it.finding {
+    for it in &m.covers {
+        if let (Some(f), Some(r)) = (&it.finding, base.get(&it.id)) {
             if st(r, "cover") != "reached" {
-                l.extend([String::new(), format!("**`{}`:** {}", it.id, f.trim())]);
+                l.extend([format!("**`{}`:** {}", it.id, f.trim()), String::new()]);
             }
         }
     }
-    l.extend(
-        [
-            "",
-            "## Mutants",
-            "",
-            "Each mutant is an RTL change a property should catch. A survivor means the property set has a gap.",
-            "",
-            "| id | change | status | killed by |",
-            "|---|---|---|---|",
-        ]
-        .map(String::from),
-    );
-    for x in muts {
-        let killed: Vec<&str> =
-            x.get("killed_by").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
-        let by = if killed.is_empty() { st(x, "error").to_string() } else { killed.join(", ") };
+    l
+}
+
+fn mutation(rec: &Value) -> Vec<String> {
+    let mut l: Vec<String> = [
+        "## 8. Mutation analysis",
+        "",
+        "Mutation testing measures the ability of the selected property set to detect the selected injected \
+         defects. It does not establish that all possible defects would be detected.",
+        "",
+        "| mutant | defect injected | run against | detected by | result |",
+        "|---|---|---|---|---|",
+    ]
+    .map(String::from)
+    .to_vec();
+    for x in rec["mutants"].as_array().into_iter().flatten() {
+        let by = if x["killed_by"].as_array().is_some_and(|a| !a.is_empty()) { code_list(&x["killed_by"]) } else { st(x, "error").to_string() };
+        let against = if x["run_against"].is_string() { "all properties".to_string() } else { code_list(&x["run_against"]) };
         let ok = x.get("ok").and_then(Value::as_bool).unwrap_or(false);
-        l.push(format!(
-            "| `{}` | {} | {}{} | {by} |",
-            st(x, "id"),
-            st(x, "text"),
-            st(x, "status"),
-            if ok { "" } else { " (UNEXPECTED)" }
-        ));
+        let status = if st(x, "status") == "killed" { "Detected" } else { st(x, "status") };
+        l.push(format!("| `{}` | {} | {against} | {by} | {status}{} |", st(x, "id"), st(x, "text"), if ok { "" } else { " (UNEXPECTED)" }));
     }
-    let names = |k: &str, n: usize| -> (usize, String) {
-        let a: Vec<String> = lintr.get(k).and_then(Value::as_array).map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
-        let shown: Vec<String> = a.iter().take(n).map(|s| format!("`{s}`")).collect();
-        (a.len(), if a.is_empty() { String::new() } else { format!(" — {}", shown.join(", ")) })
-    };
-    let (ns, ss) = names("sync_reset", 20);
-    let (nn, sn) = names("no_reset", 40);
     l.extend([
         String::new(),
-        "## Lint".into(),
+        format!("Surviving mutants: {}.", code_list(&rec["mutation"]["survivors"])),
         String::new(),
-        format!("- registers with async reset: {}", lintr.get("async_reset").cloned().unwrap_or(json!(0))),
-        format!("- registers with sync reset: {ns}{ss}"),
-        format!("- **registers without reset: {nn}**{sn}"),
-        format!("- monitor registers (not design): {}", lintr.get("monitor").cloned().unwrap_or(json!(0))),
+        format!("Proved properties that detected no mutant: {}.", code_list(&rec["mutation"]["idle_properties"])),
         String::new(),
     ]);
+    l
+}
+
+fn limits(rec: &Value) -> Vec<String> {
+    let mut l = vec!["## 9. Limitations and residual risk".to_string(), String::new()];
+    let found = strs_of(&rec["limitations"]);
+    if found.is_empty() {
+        l.extend(["No campaign-specific limitations were generated.".to_string(), String::new()]);
+    } else {
+        l.extend(found.iter().map(|x| format!("- {x}")));
+        l.push(String::new());
+    }
+    l.extend(["Standing limits:".to_string(), String::new(), LIMITS.to_string()]);
+    l
+}
+
+fn appendix(m: &Manifest, prov: &Obj, out_name: &str, stats_log: &Path) -> Vec<String> {
+    let p = Value::Object(prov.clone());
+    let mut l: Vec<String> = ["## 10. Reproducibility appendix", "", "| item | value |", "|---|---|"].map(String::from).to_vec();
+    for k in ["rtl_remote", "rtl_commit", "rtl_commit_date", "rtl_dirty", "run_utc", "platform"] {
+        if let Some(x) = prov.get(k) {
+            let s = x.as_str().map(str::to_string).unwrap_or_else(|| x.to_string());
+            l.push(format!("| {k} | `{s}` |"));
+        }
+    }
+    if let Some(h) = prov.get("manifest_sha256").and_then(Value::as_str) {
+        l.push(format!("| manifest | sha256 `{h}` |"));
+    }
+    let hash = |h: &Value| h.as_str().unwrap_or("").to_string();
+    for (f, h) in p["rtl_files"].as_object().into_iter().flatten() {
+        l.push(format!("| rtl `{f}` | sha256 `{}` |", hash(h)));
+    }
+    for (f, h) in p["monitors"].as_object().into_iter().flatten() {
+        l.push(format!("| monitor `{f}` | sha256 `{}` |", hash(h)));
+    }
+    let lib_name = Path::new(st(&p, "liberty")).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+    l.push(format!("| liberty | `{lib_name}` sha256 `{}` |", hash(&p["liberty_sha256"])));
+    l.extend(tool_rows(&p));
+    l.push(format!("| default timeout | {:.0} s |", m.default_timeout_s()));
+    let own: Vec<String> =
+        m.properties.iter().chain(&m.covers).filter_map(|i| i.timeout_s.map(|t| format!("`{}` {t:.0} s", i.id))).collect();
+    if !own.is_empty() {
+        l.push(format!("| per-item timeouts | {} |", own.join(", ")));
+    }
+    l.push(String::new());
     if let Ok(log) = std::fs::read_to_string(stats_log) {
         if let Some(c) = Regex::new(r"Chip area for (?:top )?module.*?:\s*([\d.]+)").unwrap().captures(&log) {
             l.extend([
@@ -456,16 +550,46 @@ pub fn report(
             ]);
         }
     }
-    l.extend(trailer(m, &out_name));
+    l.extend(trailer(m, out_name));
+    l
+}
+
+/// The count from Yosys's `check`, read from the log beside the synthesis statistics.
+fn yosys_problems(stats_log: &Path) -> Option<usize> {
+    let re = Regex::new(r"Found and reported (\d+) problems").unwrap();
+    let logs = [stats_log.to_path_buf(), stats_log.with_file_name("base.pass1.log")];
+    logs.iter().find_map(|f| {
+        let text = std::fs::read_to_string(f).ok()?;
+        re.captures(&text)?[1].parse().ok()
+    })
+}
+
+pub fn report(
+    m: &Manifest,
+    out: &Path,
+    prov: &Obj,
+    lintr: &Obj,
+    base: &Obj,
+    muts: &[Value],
+    stats_log: &Path,
+) -> Result<Vec<String>, String> {
+    let out_name = out.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_else(|| "out".into());
+    let unexpected = unexpected(m, base, muts);
+    let mut j = record::build(m, prov, lintr, base, muts, &unexpected, yosys_problems(stats_log));
+    let mut l: Vec<String> = vec![format!("# Formal report — {}", m.name()), String::new()];
+    l.extend(header(m, &out_name));
+    l.extend(summary(m, prov, &j, &unexpected));
+    l.extend(scope(m));
+    l.extend(plan(m, &j));
+    l.extend(environment(&j, lintr));
+    l.extend(property_table(m, &j));
+    l.extend(cover_table(m, &j));
+    l.extend(finding_blocks(m, base, &j));
+    l.extend(mutation(&j));
+    l.extend(limits(&j));
+    l.extend(appendix(m, prov, &out_name, stats_log));
     let md = out.join("report.md");
     std::fs::write(&md, l.join("\n")).map_err(|e| format!("{}: {e}", md.display()))?;
-    let mut j = json!({
-        "provenance": prov,
-        "lint": lintr,
-        "results": base,
-        "mutants": muts,
-        "unexpected": unexpected,
-    });
     let subs = path_subs(m, out, st(&j["provenance"], "liberty"));
     portable_paths(&mut j, &subs);
     let jp = out.join("report.json");
@@ -537,6 +661,78 @@ fn tool_rows(p: &Value) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+
+    /// A packed request reads as named fields, the report's only view of it without a bit map.
+    #[test]
+    fn excerpt_decodes_a_packed_signal() {
+        use crate::manifest::{Decode, DecodeField};
+        let t = json!({"inputs_per_cycle": [{"tl[3]": true, "tl[4]": true, "tl[0]": true}]});
+        let d = Decode {
+            signal: "tl".into(),
+            fields: vec![
+                DecodeField { name: "addr".into(), lsb: 3, width: 2 },
+                DecodeField { name: "rdy".into(), lsb: 0, width: 1 },
+            ],
+        };
+        assert_eq!(super::decoded_excerpt(&t, 40, &[d]), ["cycle 0: tl(addr=0x3 rdy=0x1)"]);
+    }
+
+    /// The tool writes the sections in the specified order and the record its schema requires.
+    #[test]
+    fn report_has_every_section_and_the_schema_keys() {
+        let dir = std::env::temp_dir().join(format!("vf-report-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mf = dir.join("m.toml");
+        std::fs::write(&mf, r#"
+[ip]
+name = "x"
+[rtl]
+top = "t"
+files = ["t.v"]
+[[requirement]]
+id = "R-1"
+text = "It holds."
+[[assumption]]
+id = "a"
+text = "A."
+class = "temporary"
+[[property]]
+id = "p"
+text = "P."
+requirements = ["R-1"]
+assumptions = ["a"]
+activation = "c"
+[[cover]]
+id = "c"
+text = "C."
+assumptions = ["a"]
+"#).unwrap();
+        let m = crate::manifest::Manifest::load(&mf).unwrap();
+        let obj = |v: serde_json::Value| v.as_object().unwrap().clone();
+        let prov = obj(json!({"rtl_commit": "abcdef0123456789", "rtl_dirty": false}));
+        let base = obj(json!({
+            "p": {"verdict": "holds", "seconds": 1.0, "status": "as-expected", "net": "vf_g_p"},
+            "c": {"verdict": "fails", "cover": "reached", "seconds": 1.0, "status": "as-expected", "net": "vf_g_c"},
+        }));
+        super::report(&m, &dir, &prov, &obj(json!({})), &base, &[], &dir.join("none.log")).unwrap();
+        let md = std::fs::read_to_string(dir.join("report.md")).unwrap();
+        let mut at = 0;
+        for n in 1..=10 {
+            let h = format!("## {n}. ");
+            let i = md[at..].find(&h).unwrap_or_else(|| panic!("section {n} missing or out of order"));
+            at += i;
+        }
+        assert!(md.contains("It does not establish that all possible defects would be detected"));
+        let j: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("report.json")).unwrap()).unwrap();
+        assert_eq!(j["verdict"], "CLEAN", "proved, activated, and a clean tree");
+        assert_eq!(j["results"]["p"]["result"], "PROVEN");
+        assert_eq!(j["results"]["p"]["activation"], "`c`: REACHED");
+        let schema: serde_json::Value = serde_json::from_str(include_str!("../schemas/formal-report.schema.json")).unwrap();
+        for k in schema["required"].as_array().unwrap() {
+            assert!(j.get(k.as_str().unwrap()).is_some(), "report.json lacks {k}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     /// A counterexample is confirmed by replay, so the simulator's version is part of the result.
     #[test]

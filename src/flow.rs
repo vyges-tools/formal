@@ -118,6 +118,7 @@ pub fn provenance(m: &Manifest, tools: &Tools) -> Result<Obj, String> {
     p.insert("yosys".into(), json!(ver(&[tools.yosys.clone(), "-V".into()])));
     p.insert("lec".into(), json!(ver(&[tools.lec.clone(), "--version".into()])));
     p.insert("formal".into(), json!(format!("vyges-formal {}", crate::VERSION)));
+    p.insert("platform".into(), json!(format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS)));
     // The replay simulator and, when it is the frontend, sv2v shape the results as much as yosys.
     let verilator = match &tools.verilator {
         Some(v) => ver(&[v.clone(), "--version".into()]),
@@ -288,7 +289,7 @@ fn yosys_front(m: &Manifest) -> Vec<String> {
     for (k, v) in m.params() {
         c.push(format!("chparam -set {k} {v} {top}"));
     }
-    c.extend([format!("hierarchy -check -top {top}"), "proc".into(), "flatten".into()]);
+    c.extend([format!("hierarchy -check -top {top}"), "proc".into(), "flatten".into(), "check".into()]);
     c
 }
 
@@ -983,6 +984,8 @@ mod tests {
             assumptions: vec![],
             bound: None,
             timeout_s: None,
+            requirements: vec![],
+            activation: None,
         }
     }
 

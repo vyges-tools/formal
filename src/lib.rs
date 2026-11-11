@@ -29,6 +29,7 @@ pub mod exec;
 pub mod flow;
 pub mod manifest;
 pub mod pyrepl;
+pub mod record;
 pub mod report;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

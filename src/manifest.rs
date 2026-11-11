@@ -20,6 +20,10 @@ pub struct Item {
     pub assumptions: Vec<String>,
     pub bound: Option<i64>,
     pub timeout_s: Option<f64>,
+    /// Ids from `[[requirement]]`: what this claim traces to.
+    pub requirements: Vec<String>,
+    /// The cover that shows this property's trigger can occur.
+    pub activation: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -47,6 +51,117 @@ pub struct Mutant {
 pub struct Assumption {
     pub id: String,
     pub text: String,
+    pub rationale: Option<String>,
+    pub source: Option<String>,
+    /// `environment`, `reset-model`, `design-restriction` or `temporary`.
+    pub class: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Requirement {
+    pub id: String,
+    pub text: String,
+    pub source: Option<String>,
+}
+
+/// A reviewed exclusion of one property or cover.
+#[derive(Clone, Debug)]
+pub struct Waiver {
+    pub id: String,
+    pub rationale: String,
+    pub owner: String,
+}
+
+/// One named field of a packed signal, for counterexamples a person can read.
+#[derive(Clone, Debug)]
+pub struct DecodeField {
+    pub name: String,
+    pub lsb: usize,
+    pub width: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct Decode {
+    pub signal: String,
+    pub fields: Vec<DecodeField>,
+}
+
+/// A triaged defect, from `findings.toml` beside the manifest. It outlives the commit it was found at.
+#[derive(Clone, Debug)]
+pub struct FindingRecord {
+    pub id: String,
+    pub title: String,
+    pub properties: Vec<String>,
+    pub severity: Option<String>,
+    pub found_at: Option<String>,
+    pub expected: Option<String>,
+    pub root_cause: Option<String>,
+    /// `design-defect`, `monitor-bug`, `missing-assumption`, `spec-gap` or `accepted`.
+    pub disposition: String,
+    pub fix: Option<String>,
+    pub tracker: Option<String>,
+}
+
+const ASSUMPTION_CLASSES: [&str; 4] = ["environment", "reset-model", "design-restriction", "temporary"];
+const DISPOSITIONS: [&str; 5] = ["design-defect", "monitor-bug", "missing-assumption", "spec-gap", "accepted"];
+
+fn findings_file(path: &Path) -> Result<Vec<FindingRecord>, String> {
+    let f = path.with_file_name("findings.toml");
+    if !f.exists() {
+        return Ok(vec![]);
+    }
+    let text = std::fs::read_to_string(&f).map_err(|e| format!("{}: {e}", f.display()))?;
+    let raw: Table = text.parse().map_err(|e| format!("{}: {e}", f.display()))?;
+    tables(&raw, "finding")
+        .iter()
+        .map(|t| {
+            let id = req(t, "id", "[[finding]]")?;
+            let what = format!("finding `{id}`");
+            let disposition = req(t, "disposition", &what)?;
+            if !DISPOSITIONS.contains(&disposition.as_str()) {
+                return Err(format!("{what}: unknown disposition `{disposition}`"));
+            }
+            Ok(FindingRecord {
+                title: req(t, "title", &what)?,
+                properties: strs(t, "properties"),
+                severity: s(t, "severity"),
+                found_at: s(t, "found_at"),
+                expected: s(t, "expected"),
+                root_cause: s(t, "root_cause"),
+                disposition,
+                fix: s(t, "fix"),
+                tracker: s(t, "tracker"),
+                id,
+            })
+        })
+        .collect()
+}
+
+/// A reference to something the manifest does not define is a typing error, not an empty result.
+fn check_references(
+    properties: &[Item],
+    covers: &[Item],
+    requirements: &[Requirement],
+    waivers: &[Waiver],
+) -> Result<(), String> {
+    for it in properties.iter().chain(covers) {
+        for q in &it.requirements {
+            if !requirements.iter().any(|r| &r.id == q) {
+                return Err(format!("`{}`: unknown requirement `{q}`", it.id));
+            }
+        }
+        if let Some(a) = &it.activation {
+            if !covers.iter().any(|c| &c.id == a) {
+                return Err(format!("`{}`: activation names unknown cover `{a}`", it.id));
+            }
+        }
+    }
+    for w in waivers {
+        if !properties.iter().chain(covers).any(|i| i.id == w.id) {
+            return Err(format!("waiver names unknown property or cover `{}`", w.id));
+        }
+    }
+    Ok(())
 }
 
 pub struct Manifest {
@@ -62,6 +177,12 @@ pub struct Manifest {
     pub covers: Vec<Item>,
     pub mutants: Vec<Mutant>,
     pub defaults: Table,
+    pub requirements: Vec<Requirement>,
+    pub waivers: Vec<Waiver>,
+    pub decodes: Vec<Decode>,
+    pub findings: Vec<FindingRecord>,
+    /// `[environment]`: the abstractions a result depends on, listed so they cannot go unstated.
+    pub environment: Table,
 }
 
 fn s(t: &Table, k: &str) -> Option<String> {
@@ -100,6 +221,8 @@ fn item(t: &Table, kind: &str) -> Result<Item, String> {
         assumptions: strs(t, "assumptions"),
         bound: t.get("bound").and_then(Value::as_integer),
         timeout_s: num(t, "timeout_s"),
+        requirements: strs(t, "requirements"),
+        activation: s(t, "activation"),
         id,
     })
 }
@@ -132,7 +255,17 @@ impl Manifest {
             .iter()
             .map(|a| {
                 let id = req(a, "id", "[[assumption]]")?;
-                Ok(Assumption { text: req(a, "text", &format!("assumption `{id}`"))?, id })
+                let class = s(a, "class");
+                if let Some(c) = class.as_deref().filter(|c| !ASSUMPTION_CLASSES.contains(c)) {
+                    return Err(format!("assumption `{id}`: unknown class `{c}`"));
+                }
+                Ok(Assumption {
+                    text: req(a, "text", &format!("assumption `{id}`"))?,
+                    rationale: s(a, "rationale"),
+                    source: s(a, "source"),
+                    class,
+                    id,
+                })
             })
             .collect::<Result<Vec<_>, String>>()?;
         let properties = tables(&raw, "property").iter().map(|t| item(t, "property")).collect::<Result<Vec<_>, _>>()?;
@@ -167,7 +300,48 @@ impl Manifest {
                 return Err(format!("id `{i}` must be lowercase [a-z0-9_]"));
             }
         }
+        let requirements = tables(&raw, "requirement")
+            .iter()
+            .map(|t| {
+                let id = req(t, "id", "[[requirement]]")?;
+                Ok(Requirement { text: req(t, "text", &format!("requirement `{id}`"))?, source: s(t, "source"), id })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let waivers = tables(&raw, "waiver")
+            .iter()
+            .map(|t| {
+                let id = req(t, "id", "[[waiver]]")?;
+                let what = format!("waiver `{id}`");
+                Ok(Waiver { rationale: req(t, "rationale", &what)?, owner: req(t, "owner", &what)?, id })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let decodes = tables(&raw, "decode")
+            .iter()
+            .map(|t| {
+                let signal = req(t, "signal", "[[decode]]")?;
+                let fields = tables(t, "fields")
+                    .iter()
+                    .map(|f| {
+                        let at = |k: &str| {
+                            f.get(k)
+                                .and_then(Value::as_integer)
+                                .and_then(|v| usize::try_from(v).ok())
+                                .ok_or_else(|| format!("decode `{signal}`: field needs `{k}`"))
+                        };
+                        Ok(DecodeField { name: req(f, "name", "[[decode]] field")?, lsb: at("lsb")?, width: at("width")? })
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                Ok(Decode { signal, fields })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        check_references(&properties, &covers, &requirements, &waivers)?;
+        let findings = findings_file(&path)?;
         Ok(Manifest {
+            requirements,
+            waivers,
+            decodes,
+            findings,
+            environment: sub("environment"),
             dir: path.parent().unwrap().to_path_buf(),
             path,
             ip,
