@@ -380,10 +380,8 @@ fn cover_table(m: &Manifest, rec: &Value) -> Vec<String> {
     ]
     .map(String::from)
     .to_vec();
-    let groups: [(&str, fn(&&crate::manifest::Item) -> bool); 2] =
-        [("Claimed covers", |c| !c.id.starts_with("gen_")), ("Generated state covers", |c| c.id.starts_with("gen_"))];
-    for (title, keep) in groups {
-        let chosen: Vec<_> = m.covers.iter().filter(keep).collect();
+    for (title, generated) in [("Claimed covers", false), ("Generated state covers", true)] {
+        let chosen: Vec<_> = m.covers.iter().filter(|c| c.id.starts_with("gen_") == generated).collect();
         if chosen.is_empty() {
             continue;
         }
@@ -396,7 +394,7 @@ fn cover_table(m: &Manifest, rec: &Value) -> Vec<String> {
                 None => st(r, "result").to_string(),
             };
             l.push(format!("| `{}` | {} | {result} | {} | {cyc} |", it.id, it.text, st(r, "status")));
-            if title.starts_with("Generated") && st(r, "result") == "UNREACHABLE" {
+            if generated && st(r, "result") == "UNREACHABLE" {
                 l.push(format!("| | possible dead logic: `{}` | | | |", it.id));
             }
         }
