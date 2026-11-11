@@ -211,7 +211,7 @@ pub fn prepare_rtl(m: &Manifest, tools: &Tools, work: &Path) -> Result<(String, 
 
 /// The ids a monitor defines for one kind (`p` property, `c` cover, `a` assumption).
 pub fn monitor_ids(src: &str, kind: &str) -> Vec<String> {
-    Regex::new(&format!(r"\bvf_{kind}_([a-z][a-z0-9_]*)\b\s*="))
+    Regex::new(&format!(r"\bvf_{kind}_([a-z][a-z0-9_]*)\b\s*=(?:[^=]|$)"))
         .unwrap()
         .captures_iter(src)
         .map(|c| c[1].to_string())
@@ -968,7 +968,7 @@ mod tests {
 
     #[test]
     fn monitor_ids_are_the_assigned_names() {
-        let src = "wire vf_p_one = a & b;\nassign vf_c_two = c;\nwire vf_a_three = 1'b1;\nwire x = vf_p_one;";
+        let src = "wire vf_p_one = a & b;\nassign vf_c_two = c;\nwire vf_a_three = 1'b1;\nwire x = vf_p_one;\nwire y = (vf_a_old == 1'b1);";
         assert_eq!(monitor_ids(src, "p"), ["one"]);
         assert_eq!(monitor_ids(src, "c"), ["two"]);
         assert_eq!(monitor_ids(src, "a"), ["three"]);

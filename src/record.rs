@@ -461,11 +461,12 @@ pub fn build(
         .map(|p| p.id.clone())
         .collect();
     let survivors: Vec<&str> = muts.iter().filter(|x| st(x, "status") != "killed").map(|x| st(x, "id")).collect();
-    let replayed = base
-        .values()
-        .filter(|r| r.get("replay").and_then(|x| x.get("confirmed")).and_then(Value::as_bool).unwrap_or(false))
-        .count();
-    let traces = base.values().filter(|r| r.get("trace").is_some()).count();
+    // A reached cover's trace is a witness, not a counterexample: only properties count here.
+    let failing: Vec<&Value> =
+        m.properties.iter().filter_map(|p| base.get(&p.id)).filter(|r| r.get("trace").is_some()).collect();
+    let confirmed = |r: &&Value| r.get("replay").and_then(|x| x.get("confirmed")).and_then(Value::as_bool).unwrap_or(false);
+    let replayed = failing.iter().filter(confirmed).count();
+    let traces = failing.len();
     let short: String = prov.get("rtl_commit").and_then(Value::as_str).unwrap_or("").chars().take(12).collect();
     let limits = limitations(m, &results, &untraced, &unconfirmed, yosys_problems, &no_activation);
     json!({

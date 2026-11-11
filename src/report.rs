@@ -552,14 +552,25 @@ fn appendix(m: &Manifest, prov: &Obj, out_name: &str, stats_log: &Path) -> Vec<S
     l
 }
 
-/// The count from Yosys's `check`, read from the log beside the synthesis statistics.
+/// Problems in one Yosys log's `check` output, or `None` if the pass did not run. Undriven wires
+/// with `$` in their name are Yosys's own temporaries (memory and function expansion), not design nets.
+fn check_problems(log: &str) -> Option<usize> {
+    let start = log.find("Executing CHECK pass")?;
+    let body = &log[start..];
+    let end = body.find("Found and reported")?;
+    let is_problem = |line: &&str| {
+        let l = line.to_lowercase();
+        l.contains("logic loop")
+            || l.contains("multiple conflicting drivers")
+            || (l.contains("used but has no driver") && !line.contains('$'))
+    };
+    Some(body[..end].lines().filter(is_problem).count())
+}
+
+/// The problem count from Yosys's `check`, read from the log beside the synthesis statistics.
 fn yosys_problems(stats_log: &Path) -> Option<usize> {
-    let re = Regex::new(r"Found and reported (\d+) problems").unwrap();
-    let logs = [stats_log.to_path_buf(), stats_log.with_file_name("base.pass1.log")];
-    logs.iter().find_map(|f| {
-        let text = std::fs::read_to_string(f).ok()?;
-        re.captures(&text)?[1].parse().ok()
-    })
+    let logs = [stats_log.with_file_name("base.pass1.log"), stats_log.to_path_buf()];
+    logs.iter().find_map(|f| check_problems(&std::fs::read_to_string(f).ok()?))
 }
 
 pub fn report(
@@ -659,6 +670,20 @@ fn tool_rows(p: &Value) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+
+    /// Yosys temporaries are not design problems; a real conflict or a real undriven net is.
+    #[test]
+    fn check_counts_design_problems_only() {
+        let log = "6. Executing CHECK pass (checking for obvious problems).
+Warning: Wire m.$mem2reg_wr$x_ADDR [2] is used but has no driver.
+Warning: Wire m.\\f$func$a.d [0] is used but has no driver.
+Warning: Wire m.\\real [0] is used but has no driver.
+Warning: multiple conflicting drivers for m.\\q:
+Found and reported 4 problems.
+";
+        assert_eq!(super::check_problems(log), Some(2));
+        assert_eq!(super::check_problems("no check here"), None);
+    }
 
     /// A packed request reads as named fields, the report's only view of it without a bit map.
     #[test]
