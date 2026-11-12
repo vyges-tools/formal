@@ -214,19 +214,79 @@ fn opt<'a>(v: &'a Value, k: &str) -> &'a str {
     }
 }
 
+/// Whether the run can be trusted, before any result is read: the RTL tree is clean and every
+/// assumption set is shown satisfiable by a reached cover. Reported, not yet a verdict of its own.
+fn setup_status(rec: &Value) -> (bool, Vec<&'static str>) {
+    let mut why = Vec::new();
+    if rec["provenance"]["rtl_dirty"].as_bool().unwrap_or(false) {
+        why.push("RTL tree dirty");
+    }
+    if rec["environment"]["setup"]["unconfirmed_assumption_sets"].as_array().is_some_and(|a| !a.is_empty()) {
+        why.push("an assumption set with no reached cover");
+    }
+    (why.is_empty(), why)
+}
+
+fn setup_status_line(rec: &Value) -> String {
+    match setup_status(rec) {
+        (true, _) => "**Setup: VALID** (section 4)".to_string(),
+        (false, why) => format!("**Setup: INVALID** — {} (section 4): no result below can be trusted", why.join("; ")),
+    }
+}
+
+/// A section's lines as a subsection of another: its `## N. Title` becomes `### Title`, and each
+/// heading under it one level deeper.
+fn demote(lines: Vec<String>) -> Vec<String> {
+    lines
+        .into_iter()
+        .map(|l| match l.strip_prefix("## ") {
+            Some(t) => format!("### {}", t.split_once(". ").map_or(t, |(_, title)| title)),
+            None if l.starts_with("### ") => format!("#{l}"),
+            None => l,
+        })
+        .collect()
+}
+
+/// Checks the tool derives from the RTL by itself, with no property written: what ran, and what
+/// did not (printed, so an absent check never reads as a clean one).
+fn design_analysis(rec: &Value) -> Vec<String> {
+    let check = match rec["environment"]["setup"]["yosys_check_problems"].as_u64() {
+        Some(n) => format!("{n} problems"),
+        None => "not run".to_string(),
+    };
+    vec![
+        "## 6. Design analysis".to_string(),
+        String::new(),
+        "Checks derived from the RTL itself, without a written property.".into(),
+        String::new(),
+        "| class | check | result |".into(),
+        "|---|---|---|".into(),
+        format!("| signal integrity | Yosys `check`: combinational loops, multiple drivers, undriven | {check} |"),
+        "| signal integrity | X-assignment and X-propagation | not run |".into(),
+        "| control | FSM deadlock or livelock, unreachable states, case full/parallel | not run |".into(),
+        "| indexing | array index out of bounds | not run |".into(),
+        "| arithmetic | overflow, underflow, truncation | not run |".into(),
+        String::new(),
+        "Unreachable generated state covers (possible dead logic) are listed in section 5.".into(),
+        String::new(),
+    ]
+}
+
 fn summary(m: &Manifest, prov: &Obj, rec: &Value, unexpected: &[String]) -> Vec<String> {
     let c = &rec["counts"];
     let row = |group: &str, keys: &[&str]| -> String {
         keys.iter().map(|k| format!("{k} {}", c[group][*k])).collect::<Vec<_>>().join(" · ")
     };
     let mut l = vec![
-        "## 1. Verification summary".to_string(),
+        "## 1. Summary".to_string(),
         String::new(),
         format!("_{}_", m.ip_str("description").unwrap_or_default()),
         String::new(),
         rtl_line(prov),
         String::new(),
         format!("**Verdict: {}** (run {})", st(rec, "verdict"), st(&rec["provenance"], "run_utc")),
+        String::new(),
+        setup_status_line(rec),
         String::new(),
         "Every claim below holds only under the assumptions listed for it in section 4.".into(),
         String::new(),
@@ -290,7 +350,7 @@ fn plan(m: &Manifest, rec: &Value) -> Vec<String> {
 
 fn environment(rec: &Value, lintr: &Obj) -> Vec<String> {
     let e = &rec["environment"];
-    let mut l: Vec<String> = ["## 4. Formal environment", "", "### Clocks and resets", "", "| module | clock | reset |", "|---|---|---|"]
+    let mut l: Vec<String> = ["## 4. Setup report", "", "### Clocks and resets", "", "| module | clock | reset |", "|---|---|---|"]
         .map(String::from)
         .to_vec();
     for b in e["clocks"].as_array().into_iter().flatten() {
@@ -314,15 +374,13 @@ fn environment(rec: &Value, lintr: &Obj) -> Vec<String> {
     ] {
         l.push(format!("| {label} | {} |", code_list(&e[k])));
     }
-    let check = match e["setup"]["yosys_check_problems"].as_u64() {
-        Some(n) => format!("{n} problems"),
-        None => "not run".to_string(),
-    };
     l.extend([
         String::new(),
         "### Setup analysis".into(),
         String::new(),
-        format!("- Yosys `check` (loops, multiple drivers): {check}"),
+        setup_status_line(rec),
+        String::new(),
+        format!("- RTL tree: {}", if rec["provenance"]["rtl_dirty"].as_bool().unwrap_or(false) { "DIRTY" } else { "clean" }),
         format!("- Assumption sets with no reached cover: {}", code_list(&e["setup"]["unconfirmed_assumption_sets"])),
         format!(
             "- Registers: {} with async reset, {} with sync reset, {} in monitors",
@@ -404,7 +462,7 @@ fn cover_table(m: &Manifest, rec: &Value) -> Vec<String> {
 }
 
 fn finding_blocks(m: &Manifest, base: &Obj, rec: &Value) -> Vec<String> {
-    let mut l = vec!["## 7. Findings".to_string(), String::new()];
+    let mut l = vec!["## 2. Findings".to_string(), String::new()];
     let all = rec["findings"].as_array().map(Vec::as_slice).unwrap_or(&[]);
     if all.is_empty() {
         l.extend(["No findings are recorded for this campaign.".to_string(), String::new()]);
@@ -499,7 +557,7 @@ fn mutation(rec: &Value) -> Vec<String> {
 }
 
 fn limits(rec: &Value) -> Vec<String> {
-    let mut l = vec!["## 9. Limitations and residual risk".to_string(), String::new()];
+    let mut l = vec!["## 7. Limitations and residual risk".to_string(), String::new()];
     let found = strs_of(&rec["limitations"]);
     if found.is_empty() {
         l.extend(["No campaign-specific limitations were generated.".to_string(), String::new()]);
@@ -513,7 +571,7 @@ fn limits(rec: &Value) -> Vec<String> {
 
 fn appendix(m: &Manifest, prov: &Obj, out_name: &str, stats_log: &Path) -> Vec<String> {
     let p = Value::Object(prov.clone());
-    let mut l: Vec<String> = ["## 10. Reproducibility appendix", "", "| item | value |", "|---|---|"].map(String::from).to_vec();
+    let mut l: Vec<String> = ["## 8. Reproducibility appendix", "", "| item | value |", "|---|---|"].map(String::from).to_vec();
     for k in ["rtl_remote", "rtl_commit", "rtl_commit_date", "rtl_dirty", "run_utc", "platform"] {
         if let Some(x) = prov.get(k) {
             let s = x.as_str().map(str::to_string).unwrap_or_else(|| x.to_string());
@@ -587,14 +645,23 @@ pub fn report(
     let mut j = record::build(m, prov, lintr, base, muts, &unexpected, yosys_problems(stats_log));
     let mut l: Vec<String> = vec![format!("# Formal report — {}", m.name()), String::new()];
     l.extend(header(m, &out_name));
+    // Summary and findings first; then campaign -> setup -> verification intent -> design analysis.
     l.extend(summary(m, prov, &j, &unexpected));
-    l.extend(scope(m));
-    l.extend(plan(m, &j));
-    l.extend(environment(&j, lintr));
-    l.extend(property_table(m, &j));
-    l.extend(cover_table(m, &j));
     l.extend(finding_blocks(m, base, &j));
-    l.extend(mutation(&j));
+    l.extend(["## 3. Campaign".to_string(), String::new()]);
+    l.extend(demote(scope(m)));
+    l.extend(demote(plan(m, &j)));
+    l.extend(environment(&j, lintr));
+    l.extend([
+        "## 5. Verification intent".to_string(),
+        String::new(),
+        "Checks written from the specification: properties, their covers, and how strongly they detect injected defects.".into(),
+        String::new(),
+    ]);
+    l.extend(demote(property_table(m, &j)));
+    l.extend(demote(cover_table(m, &j)));
+    l.extend(demote(mutation(&j)));
+    l.extend(design_analysis(&j));
     l.extend(limits(&j));
     l.extend(appendix(m, prov, &out_name, stats_log));
     let md = out.join("report.md");
@@ -740,12 +807,18 @@ assumptions = ["a"]
         super::report(&m, &dir, &prov, &obj(json!({})), &base, &[], &dir.join("none.log")).unwrap();
         let md = std::fs::read_to_string(dir.join("report.md")).unwrap();
         let mut at = 0;
-        for n in 1..=10 {
+        for n in 1..=8 {
             let h = format!("## {n}. ");
             let i = md[at..].find(&h).unwrap_or_else(|| panic!("section {n} missing or out of order"));
             at += i;
         }
         assert!(md.contains("It does not establish that all possible defects would be detected"));
+        // Summary and findings first, then campaign -> setup -> intent -> design analysis (the
+        // section loop above checks the order); the setup status is stated before any result.
+        assert!(md.contains("**Setup: VALID** (section 4)"));
+        assert!(md.find("**Setup: VALID**").unwrap() < md.find("## 2. Findings").unwrap());
+        assert!(md.contains("### Property results") && md.contains("### Mutation analysis"), "intent sections are subsections of 5");
+        assert!(md.contains("| control | FSM deadlock or livelock, unreachable states, case full/parallel | not run |"), "an absent check says so");
         let j: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("report.json")).unwrap()).unwrap();
         assert_eq!(j["verdict"], "CLEAN", "proved, activated, and a clean tree");
         assert_eq!(j["results"]["p"]["result"], "PROVEN");
@@ -755,6 +828,23 @@ assumptions = ["a"]
             assert!(j.get(k.as_str().unwrap()).is_some(), "report.json lacks {k}");
         }
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Setup gates trust: a dirty tree or an assumption set no cover reached makes it INVALID.
+    #[test]
+    fn setup_status_is_invalid_on_a_dirty_tree_or_an_unconfirmed_assumption_set() {
+        let rec = |dirty: bool, unconfirmed: serde_json::Value| json!({"provenance": {"rtl_dirty": dirty}, "environment": {"setup": {"unconfirmed_assumption_sets": unconfirmed}}});
+        assert_eq!(super::setup_status(&rec(false, json!([]))), (true, vec![]));
+        assert_eq!(super::setup_status(&rec(true, json!([]))).1, ["RTL tree dirty"]);
+        assert!(!super::setup_status(&rec(false, json!(["a1"]))).0);
+        assert!(super::setup_status_line(&rec(true, json!(["a1"]))).starts_with("**Setup: INVALID** — RTL tree dirty; an assumption set"));
+    }
+
+    /// A section folded under another keeps its title and drops its number; its headings go one deeper.
+    #[test]
+    fn demote_turns_a_section_into_a_subsection() {
+        let got = super::demote(vec!["## 6. Coverage and reachability".into(), "### Claimed covers".into(), "text".into()]);
+        assert_eq!(got, ["### Coverage and reachability", "#### Claimed covers", "text"]);
     }
 
     /// A counterexample is confirmed by replay, so the simulator's version is part of the result.
