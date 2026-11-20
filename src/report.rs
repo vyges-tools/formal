@@ -243,7 +243,11 @@ fn depth_and_engine(r: &Value) -> String {
         ("bound_reached", Some(n)) => format!("cycles 0 to {n}"),
         ("counterexample", Some(n)) => format!("fails in cycle {n}"),
         ("witness", Some(n)) => format!("reached in cycle {n}"),
-        ("unbounded", _) => "unbounded".to_string(),
+        ("unbounded", _) => match (d["proof_depth"]["value"].as_i64(), st(&d["proof_depth"], "unit")) {
+            (Some(k), "pdr_frame") => format!("unbounded (invariant at pdr frame {k})"),
+            (Some(c), "cycle") => format!("unbounded (every reachable state by cycle {c})"),
+            _ => "unbounded".to_string(),
+        },
         _ => format!("no depth ({})", st(d, "reason")),
     };
     let e = &r["decided_by"];
@@ -798,6 +802,16 @@ assumptions = ["a"]
         assert!(md.contains("| bounded checks reached | properties none · covers none |"));
         assert!(md.contains("| assumptions | found 1 · witnessed by a reached cover 1 · not witnessed 0 · unused 0 |"));
         assert!(md.contains("| unbounded, bdd-prepass or pdr (not reported which) |"), "the depth and engine cell");
+        let cell = |d: serde_json::Value, e: &str| super::depth_and_engine(&json!({"depth": d, "decided_by": {"engine": e, "candidates": [e]}}));
+        assert_eq!(
+            cell(json!({"cycles": null, "kind": "unbounded", "proof_depth": {"value": 3, "unit": "pdr_frame"}}), "pdr"),
+            "unbounded (invariant at pdr frame 3), pdr"
+        );
+        assert_eq!(
+            cell(json!({"cycles": null, "kind": "unbounded", "proof_depth": {"value": 4, "unit": "cycle"}}), "bmc"),
+            "unbounded (every reachable state by cycle 4), bmc"
+        );
+        assert_eq!(cell(json!({"cycles": null, "kind": "unbounded"}), "bdd-prepass"), "unbounded, bdd-prepass");
         let j: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("report.json")).unwrap()).unwrap();
         assert_eq!(j["verdict"], "CLEAN", "proved, activated, and a clean tree");
         assert_eq!(j["results"]["p"]["result"], "PROVEN");

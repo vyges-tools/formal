@@ -425,6 +425,12 @@ pub fn lint(work: &Path, tag: &str) -> Result<Obj, String> {
 // prove_all
 // ---------------------------------------------------------------------------------------------
 
+/// The prover's own entry for `net` in its `properties` list (the engine that decided it and that
+/// engine's depth), matched by net name. An older prover writes no list, and there is none.
+fn prover_property<'a>(j: &'a Value, net: &str) -> Option<&'a Value> {
+    j.get("properties")?.as_array()?.iter().find(|p| p.get("net").and_then(Value::as_str) == Some(net))
+}
+
 /// `vyges-lec prove --never NET`: the verdict, and the counterexample when there is one.
 pub fn prove_one(tools: &Tools, netlist: &Path, net: &str, bound: i64, timeout_s: f64, out: &Path) -> Obj {
     let mut cmd = vec![
@@ -472,6 +478,9 @@ pub fn prove_one(tools: &Tools, netlist: &Path, net: &str, bound: i64, timeout_s
             }
             if let Some(f) = j.get("fails") {
                 r.insert("trace".into(), f.clone());
+            }
+            if let Some(p) = prover_property(&j, net) {
+                r.insert("prover_property".into(), p.clone());
             }
         }
         None => {
@@ -940,6 +949,19 @@ pub fn resolve_tools(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `prove --json` lists every net it was given under `properties`; a result keeps its own.
+    #[test]
+    fn the_prover_property_is_the_entry_for_this_net() {
+        let j = json!({"verdict": "holds", "properties": [
+            {"net": "vf_g_a", "result": "holds", "decided_by": "bdd-prepass", "depth": null, "depth_unit": null},
+            {"net": "vf_g_b", "result": "holds", "decided_by": "pdr", "depth": 2, "depth_unit": "pdr_frame"}
+        ]});
+        assert_eq!(super::prover_property(&j, "vf_g_b").unwrap()["decided_by"], "pdr");
+        assert_eq!(super::prover_property(&j, "vf_g_a").unwrap()["decided_by"], "bdd-prepass");
+        assert!(super::prover_property(&j, "vf_g_c").is_none());
+        assert!(super::prover_property(&json!({"verdict": "holds"}), "vf_g_a").is_none(), "an older prover");
+    }
 
     #[test]
     fn closure_follows_instances_from_the_top_only() {

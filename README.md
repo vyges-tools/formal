@@ -49,9 +49,12 @@ Exit status: **0** every result as expected · **2** something unexpected (a cla
    `summary` has the same keys in every record: per kind, how many were declared and one count per
    result, zeros included, with the shallowest and deepest bound a bounded check reached. Each
    result carries `depth` (the bound reached, or the cycle a property failed or a cover was hit
-   in), `seconds` (the prover's wall time) and `decided_by`: the BDD pre-pass, `pdr` or `bmc`
-   when the prover's output pins it down, otherwise the candidates and the reason. A value that
-   is not known is null with a reason.
+   in), `seconds` (the prover's wall time) and `decided_by`: the BDD pre-pass, `pdr` or `bmc`.
+   A `vyges-lec` that lists each net under `properties` names the engine itself, and that entry is
+   kept as `prover_property`; with an older one the engine is inferred from the output where it
+   pins one down, otherwise the candidates and the reason are given. A proof's `cycles` stays null;
+   `depth.proof_depth` carries the engine's own depth with its unit (`pdr_frame`: the frame of
+   pdr's inductive invariant, not a clock cycle). A value that is not known is null with a reason.
 
 ## The manifest
 

@@ -52,8 +52,19 @@
           "status": { "enum": ["as-expected", "FINDING", "UNEXPECTED"] },
           "engine": { "description": "How the prover was invoked: BMC with a bound, otherwise PDR or the BDD pre-pass. decided_by says which engine decided.", "type": "string" },
           "seconds": { "description": "Wall-clock seconds of the prover process for this result, to 0.1 s, reading the netlist and Liberty included; parallel jobs share the machine.", "type": "number", "minimum": 0 },
+          "prover_property": {
+            "description": "Added within 1.0, optional. The prover's own entry for this net from its prove --json properties list, as written (net, result, decided_by, depth, depth_unit); absent when the prover writes no such list.",
+            "type": "object",
+            "required": ["net"],
+            "properties": {
+              "net": { "type": "string" },
+              "decided_by": { "type": ["string", "null"] },
+              "depth": { "type": ["integer", "null"] },
+              "depth_unit": { "type": ["string", "null"] }
+            }
+          },
           "decided_by": {
-            "description": "Added within 1.0. The engine that decided the result, as far as the prover's output shows: engine is set when exactly one candidate fits, null otherwise; basis says why. A timeout or an error has no engine and no candidates.",
+            "description": "Added within 1.0. The engine that decided the result: the one the prover names for this net (prover_property.decided_by) when it names one, with that engine as the only candidate; otherwise as far as the prover's output shows: engine is set when exactly one candidate fits, null otherwise. basis says why. A timeout or an error has no engine and no candidates.",
             "type": "object",
             "required": ["engine", "candidates", "basis"],
             "additionalProperties": false,
@@ -64,14 +75,24 @@
             }
           },
           "depth": {
-            "description": "Added within 1.0. Clock cycles, 0 before the first edge. bound_reached: a bounded check found nothing in cycles 0 to cycles; counterexample or witness: the cycle the property failed or the cover was reached in; unbounded: a proof for every cycle (no depth reported); none: nothing decided. reason says why cycles is null.",
+            "description": "Added within 1.0. Clock cycles, 0 before the first edge. bound_reached: a bounded check found nothing in cycles 0 to cycles; counterexample or witness: the cycle the property failed or the cover was reached in; unbounded: a proof for every cycle (cycles is null); none: nothing decided. reason says why cycles is null. proof_depth (optional, only on unbounded): the deciding engine's own depth as the prover reports it, with its unit.",
             "type": "object",
             "required": ["cycles", "kind", "reason"],
             "additionalProperties": false,
             "properties": {
               "cycles": { "type": ["integer", "null"], "minimum": 0 },
               "kind": { "enum": ["bound_reached", "counterexample", "witness", "unbounded", "none"] },
-              "reason": { "type": ["string", "null"] }
+              "reason": { "type": ["string", "null"] },
+              "proof_depth": {
+                "description": "Added within 1.0, optional. unit pdr_frame: the frame of pdr's inductive invariant, a pdr frame and not a clock cycle; unit cycle: the cycle by which bmc3 had covered every reachable state.",
+                "type": "object",
+                "required": ["value", "unit"],
+                "additionalProperties": false,
+                "properties": {
+                  "value": { "type": "integer", "minimum": 0 },
+                  "unit": { "enum": ["cycle", "pdr_frame"] }
+                }
+              }
             },
             "if": { "properties": { "cycles": { "type": "null" } } },
             "then": { "properties": { "reason": { "type": "string", "minLength": 1 } } },

@@ -156,9 +156,32 @@ fn engine(r: &Value) -> &'static str {
 /// - the pre-pass hands over to ABC when its BDD outgrows its node limit, which the output does
 ///   not show either, so a proof is always one of two engines.
 ///
+/// The engines `vyges-lec prove` can decide with.
+const ENGINES: [&str; 3] = ["bdd-prepass", "pdr", "bmc"];
+
+/// The prover's own entry for this result's net (`prover_property`, copied from the `properties`
+/// list a newer `vyges-lec prove --json` writes), when it names the same net. It says which engine
+/// decided the net and that engine's depth. A result from an older prover has none.
+fn reported(r: &Value) -> Option<&Value> {
+    let p = r.get("prover_property")?;
+    let net = r.get("net").and_then(Value::as_str)?;
+    (p.get("net").and_then(Value::as_str) == Some(net)).then_some(p)
+}
+
 /// `engine` is set when exactly one engine fits, `candidates` lists every engine that fits, and
 /// `basis` says why. Nothing decided (a timeout, an error) has no engine and no candidates.
+///
+/// A prover that names the engine for this net is taken at its word; the rules above are the
+/// fallback for one that does not (or names an engine outside this vocabulary).
 pub fn decided_by(r: &Value) -> Value {
+    let named = reported(r).and_then(|p| p.get("decided_by")).and_then(Value::as_str);
+    if let Some(e) = named.and_then(|n| ENGINES.into_iter().find(|e| *e == n)) {
+        return json!({"engine": e, "candidates": [e], "basis": format!("the prover reports that {e} decided it")});
+    }
+    inferred_decided_by(r)
+}
+
+fn inferred_decided_by(r: &Value) -> Value {
     let bounded = r.get("bound").and_then(Value::as_i64).is_some_and(|b| b != 0);
     let abc = if bounded { "bmc" } else { "pdr" };
     let registers = r.get("registers").and_then(Value::as_i64);
@@ -199,7 +222,39 @@ fn secs_of(r: &Value) -> String {
 /// - `none`: nothing was decided, so there is no depth.
 ///
 /// `reason` says why `cycles` is null, and is null when it is not.
+///
+/// When the prover reports its own depth for this net (`prover_property`), it is preferred: a
+/// cycle sets `cycles` of a bounded check, a counterexample or a witness. A proof keeps
+/// `cycles` null (it holds in every cycle) and gains `proof_depth`, the deciding engine's own
+/// depth with its unit: `pdr_frame` is the frame of pdr's inductive invariant, which is not a
+/// clock cycle; `cycle` is the cycle by which bmc3 had covered every reachable state.
 pub fn depth(r: &Value) -> Value {
+    let mut d = inferred_depth(r);
+    let Some(p) = reported(r) else { return d };
+    let n = p.get("depth").and_then(Value::as_i64).filter(|n| *n >= 0);
+    let unbounded = st(&d, "kind") == "unbounded";
+    match (st(p, "depth_unit"), n) {
+        ("cycle", Some(c)) if !unbounded && st(&d, "kind") != "none" => {
+            d["cycles"] = json!(c);
+            d["reason"] = Value::Null;
+        }
+        ("cycle", Some(c)) if unbounded => {
+            d["proof_depth"] = json!({"value": c, "unit": "cycle"});
+            d["reason"] = json!(format!("a proof for every cycle; bmc3 covered every reachable state by cycle {c}"));
+        }
+        ("pdr_frame", Some(k)) if unbounded => {
+            d["proof_depth"] = json!({"value": k, "unit": "pdr_frame"});
+            d["reason"] = json!(format!("a proof for every cycle; pdr's inductive invariant is at frame {k} (a pdr frame, not a cycle)"));
+        }
+        _ if unbounded && st(p, "decided_by") == "bdd-prepass" => {
+            d["reason"] = json!("a proof for every cycle; the BDD pre-pass shows the net is 0 in every state, which has no depth");
+        }
+        _ => {}
+    }
+    d
+}
+
+fn inferred_depth(r: &Value) -> Value {
     let cover = st(r, "kind") == "cover";
     let (cycles, kind, reason): (Option<i64>, &str, Option<String>) = match st(r, "verdict") {
         // The prover's own count; a record from before it was kept falls back to the bound it was given.
@@ -710,6 +765,70 @@ mod tests {
             let x = d(r.clone());
             assert!(x["cycles"].is_null() && !st(&x, "reason").is_empty(), "null with a reason: {r} -> {x}");
         }
+    }
+
+    /// A prover that lists `properties` names the engine and its depth for each net
+    /// (`vyges-lec` prove: `decided_by` bdd-prepass | pdr | bmc, `depth_unit` cycle | pdr_frame). That
+    /// entry is preferred, for the same net only; anything else falls back to the inference above.
+    #[test]
+    fn the_engine_and_depth_the_prover_names_are_preferred() {
+        let r = |verdict: &str, extra: Value, p: Value| {
+            let mut o = json!({"verdict": verdict, "net": "vf_g_p", "bound": null, "registers": 9, "prover_property": p});
+            o.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            o
+        };
+        let pp = |by: Value, d: Value, u: Value| json!({"net": "vf_g_p", "result": "x", "decided_by": by, "depth": d, "depth_unit": u});
+
+        // A proof by pdr: one engine, and its depth is a frame, never a cycle.
+        let x = r("holds", json!({}), pp(json!("pdr"), json!(3), json!("pdr_frame")));
+        assert_eq!(decided_by(&x)["engine"], "pdr");
+        assert_eq!(decided_by(&x)["candidates"], json!(["pdr"]));
+        let d = depth(&x);
+        assert_eq!((d["cycles"].clone(), st(&d, "kind")), (Value::Null, "unbounded"));
+        assert_eq!(d["proof_depth"], json!({"value": 3, "unit": "pdr_frame"}));
+        assert!(st(&d, "reason").contains("frame 3") && !st(&d, "reason").contains("cycle 3"), "{d}");
+
+        // A proof by the pre-pass: one engine, no depth, and the reason says so.
+        let x = r("holds", json!({}), pp(json!("bdd-prepass"), Value::Null, Value::Null));
+        assert_eq!((decided_by(&x)["engine"].clone(), decided_by(&x)["candidates"].clone()), (json!("bdd-prepass"), json!(["bdd-prepass"])));
+        let d = depth(&x);
+        assert!(d.get("proof_depth").is_none() && d["cycles"].is_null() && st(&d, "reason").contains("BDD pre-pass"), "{d}");
+
+        // bmc3 proving by exhausting the reachable states: a proof whose depth is in cycles.
+        let x = r("holds", json!({"bound": 30}), pp(json!("bmc"), json!(4), json!("cycle")));
+        assert_eq!(depth(&x)["proof_depth"], json!({"value": 4, "unit": "cycle"}));
+        assert!(depth(&x)["cycles"].is_null());
+
+        // Bounded and failing results take the prover's cycle.
+        let x = r("holds_within", json!({"bound": 25, "cycles": 25}), pp(json!("bmc"), json!(19), json!("cycle")));
+        assert_eq!(depth(&x), json!({"cycles": 19, "kind": "bound_reached", "reason": null}));
+        let x = r("fails", json!({"kind": "property"}), pp(json!("pdr"), json!(5), json!("cycle")));
+        assert_eq!(depth(&x), json!({"cycles": 5, "kind": "counterexample", "reason": null}), "no trace, yet the prover's cycle");
+
+        // Not this net, an engine outside the vocabulary, or no entry: the inference.
+        let fallback = json!({"engine": null, "candidates": ["bdd-prepass", "pdr"]});
+        for p in [
+            json!({"net": "other", "decided_by": "pdr", "depth": 3, "depth_unit": "pdr_frame"}),
+            pp(json!("sat"), json!(3), json!("pdr_frame")),
+            pp(Value::Null, Value::Null, Value::Null),
+            Value::Null,
+        ] {
+            let x = r("holds", json!({}), p.clone());
+            let e = decided_by(&x);
+            assert_eq!(json!({"engine": e["engine"], "candidates": e["candidates"]}), fallback, "{p}");
+            if p["net"] != "vf_g_p" {
+                assert_eq!(depth(&x), inferred_depth(&x), "{p}");
+            }
+        }
+        // A pdr frame on anything but a proof is not a cycle and is not used.
+        let x = r("fails", json!({"kind": "property", "trace": {"cycle": 7}}), pp(json!("pdr"), json!(2), json!("pdr_frame")));
+        assert_eq!(depth(&x), json!({"cycles": 7, "kind": "counterexample", "reason": null}));
+
+        // The schema knows proof_depth and lets every other key stay as it was.
+        let schema: Value = serde_json::from_str(include_str!("../schemas/formal-report.schema.json")).unwrap();
+        let dp = &schema["properties"]["results"]["additionalProperties"]["properties"]["depth"];
+        assert_eq!(strs(&dp["properties"]["proof_depth"]["properties"]["unit"]["enum"]), ["cycle", "pdr_frame"]);
+        assert!(!strs(&dp["required"]).contains(&"proof_depth".to_string()), "optional: older records still validate");
     }
 
     fn manifest(text: &str) -> Manifest {
