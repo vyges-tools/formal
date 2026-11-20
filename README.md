@@ -45,7 +45,13 @@ Exit status: **0** every result as expected · **2** something unexpected (a cla
 6. **Replay** — every counterexample is driven through the flattened RTL in Verilator, a second
    witness independent of the prover. One that does not replay is reported as UNEXPECTED.
 7. **Mutants** — each RTL mutant is re-synthesized and re-proved; some property must catch it.
-8. **Report** — `report.md` and `report.json`.
+8. **Report** — `report.md` and `report.json` (schema: `schemas/formal-report.schema.json`).
+   `summary` has the same keys in every record: per kind, how many were declared and one count per
+   result, zeros included, with the shallowest and deepest bound a bounded check reached. Each
+   result carries `depth` (the bound reached, or the cycle a property failed or a cover was hit
+   in), `seconds` (the prover's wall time) and `decided_by`: the BDD pre-pass, `pdr` or `bmc`
+   when the prover's output pins it down, otherwise the candidates and the reason. A value that
+   is not known is null with a reason.
 
 ## The manifest
 

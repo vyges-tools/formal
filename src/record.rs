@@ -147,6 +147,81 @@ fn engine(r: &Value) -> &'static str {
     }
 }
 
+/// Which engine decided the result, read off what `vyges-lec prove` returns. It does not name
+/// the engine, so this is what its verdict, bound and register count rule out:
+/// - the BDD pre-pass decides a cone in one cycle: it proves a net that is 0 in every state, and
+///   fails a net only when the cone has no registers (at cycle 0);
+/// - otherwise ABC decides: `pdr` without a bound (and is the only engine that gives up), `bmc`
+///   (bmc3) with one (and is the only engine that returns "no failure within N cycles");
+/// - the pre-pass hands over to ABC when its BDD outgrows its node limit, which the output does
+///   not show either, so a proof is always one of two engines.
+///
+/// `engine` is set when exactly one engine fits, `candidates` lists every engine that fits, and
+/// `basis` says why. Nothing decided (a timeout, an error) has no engine and no candidates.
+pub fn decided_by(r: &Value) -> Value {
+    let bounded = r.get("bound").and_then(Value::as_i64).is_some_and(|b| b != 0);
+    let abc = if bounded { "bmc" } else { "pdr" };
+    let registers = r.get("registers").and_then(Value::as_i64);
+    let (candidates, basis): (Vec<&str>, String) = match st(r, "verdict") {
+        "holds_within" => (vec!["bmc"], "only ABC's bmc3 reports no failure within a bound".into()),
+        "undecided" => (vec!["pdr"], "only ABC's pdr gives up; the pre-pass always decides".into()),
+        "fails" => match registers {
+            Some(n) if n > 0 => (vec![abc], format!("{n} registers in the cone: the BDD pre-pass fails only a cone without registers")),
+            Some(_) if bounded => (vec!["bdd-prepass"], "no registers in the cone, and bmc3 refuses a design without registers".into()),
+            Some(_) => (
+                vec!["bdd-prepass", "pdr"],
+                "no registers in the cone: the BDD pre-pass decides it unless its BDD outgrows the node limit; the prover does not say which".into(),
+            ),
+            None => (vec!["bdd-prepass", abc], "the prover did not report the cone's register count".into()),
+        },
+        "holds" if bounded && registers == Some(0) => {
+            (vec!["bdd-prepass"], "no registers in the cone, and bmc3 refuses a design without registers".into())
+        }
+        "holds" => (
+            vec!["bdd-prepass", abc],
+            "a proof comes from the BDD pre-pass (the net is 0 in every state) or from ABC; the prover does not say which".into(),
+        ),
+        "timeout" => (vec![], format!("nothing decided: the prover was stopped at its {} s timeout", secs_of(r))),
+        _ => (vec![], "nothing decided: the prover returned no result".into()),
+    };
+    let engine = if candidates.len() == 1 { json!(candidates[0]) } else { Value::Null };
+    json!({"engine": engine, "candidates": candidates, "basis": basis})
+}
+
+fn secs_of(r: &Value) -> String {
+    format!("{:.0}", r.get("seconds").and_then(Value::as_f64).unwrap_or(0.0))
+}
+
+/// How deep the result reaches, in clock cycles (0: before the first edge).
+/// - `bound_reached`: a bounded check found nothing in cycles 0 to `cycles`;
+/// - `counterexample` / `witness`: the cycle the property failed or the cover was reached in;
+/// - `unbounded`: a proof for every cycle; the prover reports no proof depth, so `cycles` is null;
+/// - `none`: nothing was decided, so there is no depth.
+///
+/// `reason` says why `cycles` is null, and is null when it is not.
+pub fn depth(r: &Value) -> Value {
+    let cover = st(r, "kind") == "cover";
+    let (cycles, kind, reason): (Option<i64>, &str, Option<String>) = match st(r, "verdict") {
+        // The prover's own count; a record from before it was kept falls back to the bound it was given.
+        "holds_within" => match r.get("cycles").and_then(Value::as_i64).or_else(|| r.get("bound").and_then(Value::as_i64)) {
+            Some(n) => (Some(n), "bound_reached", None),
+            None => (None, "bound_reached", Some("the prover reported no bound".into())),
+        },
+        "fails" => {
+            let kind = if cover { "witness" } else { "counterexample" };
+            match r.get("trace").and_then(|t| t.get("cycle")).and_then(Value::as_i64) {
+                Some(c) => (Some(c), kind, None),
+                None => (None, kind, Some("the prover returned no trace".into())),
+            }
+        }
+        "holds" => (None, "unbounded", Some("a proof for every cycle; the prover reports no proof depth".into())),
+        "undecided" => (None, "none", Some("ABC's pdr gave up; the prover reports no frame reached".into())),
+        "timeout" => (None, "none", Some(format!("stopped at the {} s timeout; the prover reports no partial depth", secs_of(r)))),
+        _ => (None, "none", Some("the prover returned no result".into())),
+    };
+    json!({"cycles": cycles, "kind": kind, "reason": reason})
+}
+
 fn subset(a: &[String], b: &[String]) -> bool {
     a.iter().all(|x| b.contains(x))
 }
@@ -217,6 +292,8 @@ fn enrich(it: &Item, r: &Value, outcome: Outcome, m: &Manifest, activated: &str)
     let mut o: Map<String, Value> = r.as_object().cloned().unwrap_or_default();
     o.insert("result".into(), json!(outcome.to_string()));
     o.insert("engine".into(), json!(engine(r)));
+    o.insert("decided_by".into(), decided_by(r));
+    o.insert("depth".into(), depth(r));
     o.insert("requirements".into(), str_list(&it.requirements));
     o.insert("assumptions".into(), str_list(&it.assumptions));
     o.insert("activation".into(), json!(activated));
@@ -236,6 +313,58 @@ fn tally(values: &[Outcome]) -> Value {
         o.insert(k.to_string(), json!(values.iter().filter(|v| **v == k).count()));
     }
     Value::Object(o)
+}
+
+/// One kind's counts: how many the manifest declares, how many have no result, one count per
+/// result in the vocabulary (zeros included), and the shallowest and deepest bound reached by a
+/// bounded check that found nothing.
+fn kind_summary(items: &[Item], results: &Map<String, Value>) -> Value {
+    let ran: Vec<&Value> = items.iter().filter_map(|it| results.get(&it.id)).collect();
+    let outcomes: Vec<Outcome> = ran
+        .iter()
+        .filter_map(|r| Outcome::ALL.into_iter().find(|o| o.to_string() == st(r, "result")))
+        .collect();
+    let bounds: Vec<i64> = ran
+        .iter()
+        .filter(|r| st(&r["depth"], "kind") == "bound_reached")
+        .filter_map(|r| r["depth"]["cycles"].as_i64())
+        .collect();
+    json!({
+        "found": items.len(),
+        "not_run": items.len() - ran.len(),
+        "by_result": tally(&outcomes),
+        "bounded_depth": {"min": bounds.iter().min(), "max": bounds.iter().max()},
+    })
+}
+
+/// The assumptions: how many the manifest declares, and of those how many constrain a property or
+/// cover that a REACHED cover shows satisfiable (`witnessed`), how many constrain claims with no such
+/// cover (`unwitnessed`), and how many constrain nothing (`unused`). The prover never checks an
+/// assumption; a witness only shows it does not rule out the covered behaviour.
+fn assumption_summary(m: &Manifest, base: &Obj) -> Value {
+    let reached: Vec<&Item> =
+        m.covers.iter().filter(|c| base.get(&c.id).is_some_and(|r| cover_outcome(r) == Outcome::Reached)).collect();
+    let used = |a: &str| m.properties.iter().chain(&m.covers).any(|it| it.assumptions.iter().any(|x| x == a));
+    let (mut witnessed, mut unwitnessed, mut unused) = (0, 0, 0);
+    for a in &m.assumptions {
+        if reached.iter().any(|c| c.assumptions.contains(&a.id)) {
+            witnessed += 1;
+        } else if used(&a.id) {
+            unwitnessed += 1;
+        } else {
+            unused += 1;
+        }
+    }
+    json!({"found": m.assumptions.len(), "by_witness": {"witnessed": witnessed, "unwitnessed": unwitnessed, "unused": unused}})
+}
+
+/// The `summary` block: the same keys in every record, zeros included.
+fn summary(m: &Manifest, base: &Obj, results: &Map<String, Value>) -> Value {
+    json!({
+        "properties": kind_summary(&m.properties, results),
+        "covers": kind_summary(&m.covers, results),
+        "assumptions": assumption_summary(m, base),
+    })
 }
 
 fn findings(m: &Manifest, base: &Obj, results: &Map<String, Value>, short: &str) -> Vec<Value> {
@@ -479,6 +608,7 @@ pub fn build(
             "counterexamples": {"replayed": replayed, "total": traces},
             "mutants": {"detected": muts.iter().filter(|x| st(x, "status") == "killed").count(), "total": muts.len()},
         },
+        "summary": summary(m, base, &results),
         "requirements": requirements,
         "requirements_without_property": uncovered,
         "properties_without_requirement": untraced,
@@ -540,5 +670,133 @@ mod tests {
             undecided_cause(&json!({"verdict": "holds_within", "bound": 20})),
             "not reached within 20 cycles"
         );
+    }
+
+    /// What `vyges-lec prove` can decide with (its `prop::never`): the BDD pre-pass proves a net 0
+    /// in every state, and fails one only in a cone without registers (cycle 0); ABC's `pdr` runs
+    /// without a bound and is the only engine that gives up; `bmc3` runs with one, is the only
+    /// engine that returns "no failure within N cycles", and refuses a design without registers.
+    #[test]
+    fn decided_by_names_only_an_engine_the_output_pins_down() {
+        let e = |r: Value| decided_by(&r);
+        let one = |r: Value| e(r)["engine"].clone();
+        assert_eq!(one(json!({"verdict": "holds_within", "bound": 20, "registers": 9})), "bmc");
+        assert_eq!(one(json!({"verdict": "undecided", "bound": null, "registers": 9})), "pdr");
+        assert_eq!(one(json!({"verdict": "fails", "bound": null, "registers": 9})), "pdr", "registers rule out the pre-pass");
+        assert_eq!(one(json!({"verdict": "fails", "bound": 30, "registers": 9})), "bmc");
+        assert_eq!(one(json!({"verdict": "fails", "bound": 30, "registers": 0})), "bdd-prepass");
+        assert_eq!(one(json!({"verdict": "holds", "bound": 30, "registers": 0})), "bdd-prepass");
+        let p = e(json!({"verdict": "holds", "bound": null, "registers": 9}));
+        assert_eq!((p["engine"].clone(), p["candidates"].clone()), (Value::Null, json!(["bdd-prepass", "pdr"])), "a proof: either");
+        let p = e(json!({"verdict": "fails", "bound": null, "registers": 0}));
+        assert_eq!(p["candidates"], json!(["bdd-prepass", "pdr"]));
+        let t = e(json!({"verdict": "timeout", "seconds": 300.04}));
+        assert_eq!((t["engine"].clone(), t["candidates"].clone()), (Value::Null, json!([])));
+        assert!(st(&t, "basis").contains("300 s"), "{t}");
+        for r in [json!({"verdict": "holds"}), json!({"verdict": "error"}), json!({"verdict": "fails", "registers": 3})] {
+            assert!(!st(&e(r.clone()), "basis").is_empty(), "every answer says why: {r}");
+        }
+    }
+
+    /// The depth is the prover's own figure, and null only with a reason.
+    #[test]
+    fn depth_is_the_bound_reached_or_the_failing_cycle() {
+        let d = |r: Value| depth(&r);
+        assert_eq!(d(json!({"verdict": "holds_within", "bound": 25, "cycles": 20})), json!({"cycles": 20, "kind": "bound_reached", "reason": null}));
+        assert_eq!(d(json!({"verdict": "holds_within", "bound": 25}))["cycles"], 25, "an older record: the bound it was given");
+        assert_eq!(d(json!({"verdict": "fails", "kind": "property", "trace": {"cycle": 7}})), json!({"cycles": 7, "kind": "counterexample", "reason": null}));
+        assert_eq!(d(json!({"verdict": "fails", "kind": "cover", "trace": {"cycle": 3}}))["kind"], "witness");
+        for r in [json!({"verdict": "holds"}), json!({"verdict": "timeout", "seconds": 9.0}), json!({"verdict": "undecided"}), json!({"verdict": "error"})] {
+            let x = d(r.clone());
+            assert!(x["cycles"].is_null() && !st(&x, "reason").is_empty(), "null with a reason: {r} -> {x}");
+        }
+    }
+
+    fn manifest(text: &str) -> Manifest {
+        let dir = std::env::temp_dir().join(format!("vf-record-test-{}-{}", std::process::id(), text.len()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("m.toml");
+        std::fs::write(&f, text).unwrap();
+        let m = Manifest::load(&f).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        m
+    }
+
+    /// Every status in the vocabulary is present in the summary, zero or not, and the bounded
+    /// depths are the extremes over bounded checks only.
+    #[test]
+    fn the_summary_keeps_every_key_and_the_bounded_extremes() {
+        let m = manifest(
+            r#"
+[ip]
+name = "x"
+[rtl]
+top = "t"
+files = ["t.v"]
+[[assumption]]
+id = "a"
+text = "A."
+[[assumption]]
+id = "b"
+text = "B."
+[[assumption]]
+id = "z"
+text = "Z."
+[[property]]
+id = "p1"
+text = "P1."
+assumptions = ["a", "b"]
+[[property]]
+id = "p2"
+text = "P2."
+[[property]]
+id = "p3"
+text = "P3."
+[[property]]
+id = "p4"
+text = "P4."
+[[cover]]
+id = "c"
+text = "C."
+assumptions = ["a"]
+"#,
+        );
+        let base: Obj = json!({
+            "p1": {"verdict": "holds_within", "bound": 45, "cycles": 45, "kind": "property"},
+            "p2": {"verdict": "holds_within", "bound": 20, "cycles": 20, "kind": "property"},
+            "p3": {"verdict": "fails", "bound": null, "kind": "property", "registers": 4, "trace": {"cycle": 99}},
+            "c": {"verdict": "fails", "cover": "reached", "kind": "cover", "registers": 4, "trace": {"cycle": 2}},
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let j = build(&m, &Obj::new(), &Obj::new(), &base, &[], &[], Some(0));
+        let s = &j["summary"];
+        let p = &s["properties"];
+        assert_eq!((p["found"].clone(), p["not_run"].clone()), (json!(4), json!(1)), "p4 has no result");
+        for o in Outcome::ALL {
+            assert!(p["by_result"][o.to_string()].is_u64() && s["covers"]["by_result"][o.to_string()].is_u64(), "{o} missing");
+        }
+        assert_eq!((p["by_result"]["BOUNDED"].clone(), p["by_result"]["FAILED"].clone(), p["by_result"]["PROVEN"].clone()), (json!(2), json!(1), json!(0)));
+        assert_eq!(p["bounded_depth"], json!({"min": 20, "max": 45}), "a counterexample's cycle 99 is not a bound");
+        assert_eq!(s["covers"]["bounded_depth"], json!({"min": null, "max": null}));
+        assert_eq!(s["assumptions"], json!({"found": 3, "by_witness": {"witnessed": 1, "unwitnessed": 1, "unused": 1}}));
+        assert_eq!(j["results"]["p3"]["depth"]["cycles"], 99);
+        assert_eq!(j["results"]["p3"]["decided_by"]["engine"], "pdr");
+        // The schema requires exactly the keys written.
+        let schema: Value = serde_json::from_str(include_str!("../schemas/formal-report.schema.json")).unwrap();
+        let keys = |v: &Value| -> Vec<String> { v.as_object().unwrap().keys().cloned().collect() };
+        let req = |v: &Value| -> Vec<String> { strs(&v["required"]) };
+        let ks = &schema["$defs"]["kind_summary"];
+        assert_eq!(keys(p), req(ks));
+        assert_eq!(keys(&p["by_result"]), req(&ks["properties"]["by_result"]));
+        assert_eq!(keys(s), req(&schema["properties"]["summary"]));
+        let res = &schema["properties"]["results"]["additionalProperties"]["properties"];
+        assert_eq!(keys(&j["results"]["p3"]["decided_by"]), req(&res["decided_by"]));
+        assert_eq!(keys(&j["results"]["p3"]["depth"]), req(&res["depth"]));
+    }
+
+    fn strs(v: &Value) -> Vec<String> {
+        v.as_array().unwrap().iter().map(|x| x.as_str().unwrap().to_string()).collect()
     }
 }

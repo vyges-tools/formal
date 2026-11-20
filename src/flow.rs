@@ -466,6 +466,10 @@ pub fn prove_one(tools: &Tools, netlist: &Path, net: &str, bound: i64, timeout_s
         Some(j) => {
             r.insert("verdict".into(), j.get("verdict").cloned().unwrap_or(json!("error")));
             r.insert("registers".into(), j.get("registers").cloned().unwrap_or(Value::Null));
+            // A bounded check's last cycle, as the prover reports it.
+            if let Some(c) = j.get("cycles") {
+                r.insert("cycles".into(), c.clone());
+            }
             if let Some(f) = j.get("fails") {
                 r.insert("trace".into(), f.clone());
             }

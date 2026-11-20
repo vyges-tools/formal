@@ -214,10 +214,59 @@ fn opt<'a>(v: &'a Value, k: &str) -> &'a str {
     }
 }
 
+/// The shallowest and deepest bound per kind, over bounded checks that found nothing.
+fn bounded_depths(sum: &Value) -> String {
+    let one = |k: &str| -> String {
+        let b = &sum[k]["bounded_depth"];
+        match (b["min"].as_i64(), b["max"].as_i64()) {
+            (Some(lo), Some(hi)) if lo == hi => format!("{k} to cycle {lo}"),
+            (Some(lo), Some(hi)) => format!("{k} to cycles {lo} to {hi}"),
+            _ => format!("{k} none"),
+        }
+    };
+    format!("{} · {}", one("properties"), one("covers"))
+}
+
+fn assumption_row(a: &Value) -> String {
+    let w = &a["by_witness"];
+    format!(
+        "found {} · witnessed by a reached cover {} · not witnessed {} · unused {}",
+        a["found"], w["witnessed"], w["unwitnessed"], w["unused"]
+    )
+}
+
+/// The property table's depth and engine cell, from `depth` and `decided_by`.
+fn depth_and_engine(r: &Value) -> String {
+    let d = &r["depth"];
+    let cyc = d["cycles"].as_i64();
+    let depth = match (st(d, "kind"), cyc) {
+        ("bound_reached", Some(n)) => format!("cycles 0 to {n}"),
+        ("counterexample", Some(n)) => format!("fails in cycle {n}"),
+        ("witness", Some(n)) => format!("reached in cycle {n}"),
+        ("unbounded", _) => "unbounded".to_string(),
+        _ => format!("no depth ({})", st(d, "reason")),
+    };
+    let e = &r["decided_by"];
+    let engine = match e["engine"].as_str() {
+        Some(x) => x.to_string(),
+        None => match strs_of(&e["candidates"]).as_slice() {
+            [] => "no engine decided".to_string(),
+            c => format!("{} (not reported which)", c.join(" or ")),
+        },
+    };
+    format!("{depth}, {engine}")
+}
+
 fn summary(m: &Manifest, prov: &Obj, rec: &Value, unexpected: &[String]) -> Vec<String> {
     let c = &rec["counts"];
     let row = |group: &str, keys: &[&str]| -> String {
-        keys.iter().map(|k| format!("{k} {}", c[group][*k])).collect::<Vec<_>>().join(" · ")
+        let found = format!("found {}", rec["summary"][group]["found"]);
+        let not_run = match rec["summary"][group]["not_run"].as_u64() {
+            Some(n) if n > 0 => vec![format!("not run {n}")],
+            _ => vec![],
+        };
+        let counts = keys.iter().map(|k| format!("{k} {}", c[group][*k]));
+        [found].into_iter().chain(counts).chain(not_run).collect::<Vec<_>>().join(" · ")
     };
     let mut l = vec![
         "## 1. Verification summary".to_string(),
@@ -234,6 +283,8 @@ fn summary(m: &Manifest, prov: &Obj, rec: &Value, unexpected: &[String]) -> Vec<
         "|---|---|".into(),
         format!("| properties | {} |", row("properties", &["PROVEN", "BOUNDED", "FAILED", "UNDECIDED", "VACUOUS", "WAIVED"])),
         format!("| covers | {} |", row("covers", &["REACHED", "UNREACHABLE", "UNDECIDED", "WAIVED"])),
+        format!("| bounded checks reached | {} |", bounded_depths(&rec["summary"])),
+        format!("| assumptions | {} |", assumption_row(&rec["summary"]["assumptions"])),
         format!("| counterexamples replayed | {} of {} |", c["counterexamples"]["replayed"], c["counterexamples"]["total"]),
         format!("| mutants detected | {} of {} |", c["mutants"]["detected"], c["mutants"]["total"]),
         String::new(),
@@ -346,10 +397,7 @@ fn property_table(m: &Manifest, rec: &Value) -> Vec<String> {
     .to_vec();
     for it in &m.properties {
         let Some(r) = rec["results"].get(&it.id) else { continue };
-        let depth = match r.get("bound").and_then(Value::as_i64) {
-            Some(b) if b != 0 => format!("to cycle {b}, {}", st(r, "engine")),
-            _ => format!("unbounded, {}", st(r, "engine")),
-        };
+        let depth = depth_and_engine(r);
         let result = match r.get("cause").and_then(Value::as_str) {
             Some(c) => format!("{} ({c})", st(r, "result")),
             None => st(r, "result").to_string(),
@@ -746,6 +794,10 @@ assumptions = ["a"]
             at += i;
         }
         assert!(md.contains("It does not establish that all possible defects would be detected"));
+        assert!(md.contains("| properties | found 1 · PROVEN 1 · BOUNDED 0 ·"), "the summary counts what the manifest declares");
+        assert!(md.contains("| bounded checks reached | properties none · covers none |"));
+        assert!(md.contains("| assumptions | found 1 · witnessed by a reached cover 1 · not witnessed 0 · unused 0 |"));
+        assert!(md.contains("| unbounded, bdd-prepass or pdr (not reported which) |"), "the depth and engine cell");
         let j: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("report.json")).unwrap()).unwrap();
         assert_eq!(j["verdict"], "CLEAN", "proved, activated, and a clean tree");
         assert_eq!(j["results"]["p"]["result"], "PROVEN");

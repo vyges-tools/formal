@@ -13,6 +13,35 @@
       "type": "object",
       "required": ["properties", "covers", "counterexamples", "mutants"]
     },
+    "summary": {
+      "description": "Added within 1.0: optional so earlier 1.0 records stay valid; the tool writes it in every record. The same keys always, zeros included.",
+      "type": "object",
+      "required": ["properties", "covers", "assumptions"],
+      "additionalProperties": false,
+      "properties": {
+        "properties": { "$ref": "#/$defs/kind_summary" },
+        "covers": { "$ref": "#/$defs/kind_summary" },
+        "assumptions": {
+          "type": "object",
+          "required": ["found", "by_witness"],
+          "additionalProperties": false,
+          "properties": {
+            "found": { "type": "integer", "minimum": 0 },
+            "by_witness": {
+              "description": "witnessed: constrains a claim and a REACHED cover holds under it; unwitnessed: constrains claims, no such cover; unused: constrains nothing. The prover never checks an assumption.",
+              "type": "object",
+              "required": ["witnessed", "unwitnessed", "unused"],
+              "additionalProperties": false,
+              "properties": {
+                "witnessed": { "type": "integer", "minimum": 0 },
+                "unwitnessed": { "type": "integer", "minimum": 0 },
+                "unused": { "type": "integer", "minimum": 0 }
+              }
+            }
+          }
+        }
+      }
+    },
     "results": {
       "type": "object",
       "additionalProperties": {
@@ -20,12 +49,135 @@
         "required": ["result", "engine", "requirements", "assumptions", "activation", "evidence", "status", "verdict"],
         "properties": {
           "result": { "enum": ["PROVEN", "BOUNDED", "FAILED", "REACHED", "UNREACHABLE", "UNDECIDED", "VACUOUS", "WAIVED"] },
-          "status": { "enum": ["as-expected", "FINDING", "UNEXPECTED"] }
+          "status": { "enum": ["as-expected", "FINDING", "UNEXPECTED"] },
+          "engine": { "description": "How the prover was invoked: BMC with a bound, otherwise PDR or the BDD pre-pass. decided_by says which engine decided.", "type": "string" },
+          "seconds": { "description": "Wall-clock seconds of the prover process for this result, to 0.1 s, reading the netlist and Liberty included; parallel jobs share the machine.", "type": "number", "minimum": 0 },
+          "decided_by": {
+            "description": "Added within 1.0. The engine that decided the result, as far as the prover's output shows: engine is set when exactly one candidate fits, null otherwise; basis says why. A timeout or an error has no engine and no candidates.",
+            "type": "object",
+            "required": ["engine", "candidates", "basis"],
+            "additionalProperties": false,
+            "properties": {
+              "engine": { "enum": ["bdd-prepass", "pdr", "bmc", null] },
+              "candidates": { "type": "array", "items": { "enum": ["bdd-prepass", "pdr", "bmc"] }, "uniqueItems": true, "maxItems": 2 },
+              "basis": { "type": "string", "minLength": 1 }
+            }
+          },
+          "depth": {
+            "description": "Added within 1.0. Clock cycles, 0 before the first edge. bound_reached: a bounded check found nothing in cycles 0 to cycles; counterexample or witness: the cycle the property failed or the cover was reached in; unbounded: a proof for every cycle (no depth reported); none: nothing decided. reason says why cycles is null.",
+            "type": "object",
+            "required": ["cycles", "kind", "reason"],
+            "additionalProperties": false,
+            "properties": {
+              "cycles": { "type": ["integer", "null"], "minimum": 0 },
+              "kind": { "enum": ["bound_reached", "counterexample", "witness", "unbounded", "none"] },
+              "reason": { "type": ["string", "null"] }
+            },
+            "if": { "properties": { "cycles": { "type": "null" } } },
+            "then": { "properties": { "reason": { "type": "string", "minLength": 1 } } },
+            "else": { "properties": { "reason": { "type": "null" } } }
+          }
         }
       }
     },
     "findings": { "type": "array", "items": { "type": "object", "required": ["id", "title", "properties", "disposition", "state"] } },
     "mutation": { "type": "object", "required": ["survivors", "idle_properties"] },
     "limitations": { "type": "array", "items": { "type": "string" } }
+  },
+  "$defs": {
+    "kind_summary": {
+      "type": "object",
+      "required": [
+        "found",
+        "not_run",
+        "by_result",
+        "bounded_depth"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "found": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "not_run": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "by_result": {
+          "description": "One count per result in the vocabulary, zeros included.",
+          "type": "object",
+          "required": [
+            "PROVEN",
+            "BOUNDED",
+            "FAILED",
+            "REACHED",
+            "UNREACHABLE",
+            "UNDECIDED",
+            "VACUOUS",
+            "WAIVED"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "PROVEN": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "BOUNDED": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "FAILED": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "REACHED": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "UNREACHABLE": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "UNDECIDED": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "VACUOUS": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "WAIVED": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "bounded_depth": {
+          "description": "The shallowest and deepest last cycle over results a bounded check left without a failure or witness (BOUNDED properties, covers not reached within their bound, and such results later marked VACUOUS or WAIVED); null when there are none.",
+          "type": "object",
+          "required": [
+            "min",
+            "max"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "min": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "max": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            }
+          }
+        }
+      }
+    }
   }
 }
